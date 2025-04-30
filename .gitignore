@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.mypy_cache/
+.pytest_cache/
+
+# Environments
+.venv/
+venv/
+env/
+.env
+.env.*
+*.local
+
+# Secrets
+API_KEY.txt
+*.key
+*.cert
+/secrets/
+
+# Generated files
+/output/
+*.pdf
+*.html
+
+# Database
+DB/postgres_data/
+*.db
+*.sqlite
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# GTK (if including installer)
+/GTK_Installer/  # Remove if hosting installer elsewhere
