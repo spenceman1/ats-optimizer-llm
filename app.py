@@ -1,5 +1,5 @@
 import streamlit as st
-import os, time
+import os, time, pathlib
 import pandas as pd
 from jinja2 import Environment, FileSystemLoader
 import weasyprint
@@ -21,6 +21,11 @@ if "machine" not in st.session_state:
 st.title("ATS TAILORING SYSTEM (LLM)")
 
 machine = st.session_state.machine
+
+# Create output directory if not exists
+output_path = pathlib.Path("output")
+output_path.mkdir(exist_ok=True)
+(output_path/".gitkeep").touch(exist_ok=True)
 
 # --- GLOBAL VARIABLES USED FOR PDF GENERATION ----------
 
