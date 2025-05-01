@@ -42,9 +42,16 @@ class Courses(BaseModel):
     institution: str = Field(description= "Official name of the organization or company that awarded the(e.g., IBM, Snowflake, Azure")
     graduation_year: Optional[str]
 
-class Projects(BaseModel):
-    project: str = Field(description= "The project description")
-    link: Optional[HttpUrl] = Field(None, description="Provided URL of the project")
+# OBSERVATION > class Projects(BaseModel)
+# I don't recommend using it, if you choose to use it, remember to:
+# 1. improve your PDF extractions to collect links (actually this doesn't happen)
+# 2. test and validate the links until you get solid ones
+# 3. adapt your cv_template.html as well (script on doc)
+# 4. uncomment StructuredOutput class definition for projects
+# -----------------------------------------------------------------------------------
+#class Projects(BaseModel):
+#    project: str = Field(description= "The project description")
+#    link: Optional[HttpUrl] = Field(None, description="Provided URL of the project")
 
 class Skills(BaseModel):
     skill: str = Field(description= "Standardized name of the technical skill or tool. "
@@ -80,7 +87,7 @@ class StructuredOutput(BaseModel):
     skills: List[Skills]
     experience: List[ProfessionalExperience]
     education: List[Education]
-    projects: List[Projects]
+#   projects: List[Projects]
     courses: List[Courses]
     volunteering: List[Volunteering]
 
