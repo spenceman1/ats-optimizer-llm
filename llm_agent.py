@@ -126,7 +126,6 @@ class LLMAgent:
         Your task is to build a complete and well-structured Professional Profile Configuration based on the provided documents.
 
         Write in a neutral, professional tone. Do not invent any information that is not found in the reference documents.
-        The user name is: {user}.
         
         --- Resume Export ---
         {resume_text}
