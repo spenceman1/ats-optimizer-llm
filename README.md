@@ -2,7 +2,7 @@
 
 Automates resume generation and optimization by analyzing job descriptions, user resumes, and LinkedIn exports. The system uses a modular architecture with Python, PostgreSQL (via Docker), and LangChain with Groq's power and Pydantic's accuracy to produce high-quality, ATS-compliant resume PDFs.
 
-Medium Article with the complete guide and walkthrough:[Link]
+Medium Article with the complete guide and walkthrough: [Medium Link](https://medium.com/@leofgonzalez/how-i-built-an-llm-powered-resume-optimizer-to-beat-ats-filters-8ace36d5d32c)
 
 
 # Key Sections Covered in the Medium Guide:
