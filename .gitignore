@@ -27,3 +27,4 @@ DB/postgres_data/
 .vscode/
 *.swp
 *.swo
+API_KEY.txt

@@ -1,4 +1,5 @@
 version: '3.8' 
-services: 
-"  db:" 
-"    image: postgres:15" 
+environment:
+  POSTGRES_USER: ats_user
+  POSTGRES_PASSWORD: MyNewSecretPassword
+  POSTGRES_DB: ats_optimizer
