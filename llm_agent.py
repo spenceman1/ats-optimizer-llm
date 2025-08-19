@@ -1,17 +1,29 @@
+import logging
 from pathlib import Path
 from structured_output import StructuredOutput  # Your Pydantic model
-from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
 
 
 class LLMAgent:
     def __init__(self, api_key_path: str, model_name: str = "llama-3.3-70b-versatile"):
-        self.API_KEY = Path(api_key_path).read_text()
-        self.model_name = model_name
-        self.llm = self._initialize_llm()
-        self.parser = JsonOutputParser(pydantic_object=StructuredOutput)
-        self.chain = self._build_chain()
+        try:
+            api_key_file = Path(api_key_path)
+            if not api_key_file.exists():
+                raise FileNotFoundError(f"API key file not found: {api_key_path}")
+            
+            self.API_KEY = api_key_file.read_text().strip()
+            if not self.API_KEY:
+                raise ValueError("API key file is empty")
+                
+            self.model_name = model_name
+            self.llm = self._initialize_llm()
+            self.parser = JsonOutputParser(pydantic_object=StructuredOutput)
+            self.chain = self._build_chain()
+        except Exception as e:
+            logging.error(f"Failed to initialize LLMAgent: {e}")
+            raise
 
     def _initialize_llm(self):
         return ChatGroq(
@@ -61,26 +73,38 @@ class LLMAgent:
         - Do NOT invent names, dates, companies, or bullets not present in the source
         """
 
-    def generate_cv(
-        self,
-        resume_text: str,
-        linkedin_text: str,
-        job_description: str
-    ) -> StructuredOutput:
-        """
-        Returns a structured CV object based on PDF resume and LinkedIn exports.
-        """
-        llm_input = {
-            "resume_text": resume_text,
-            "linkedin_text": linkedin_text,
-            "job_description": job_description,
-            "format_instructions": self.parser.get_format_instructions()
-        }
+    def generate_cv(self, resume_text: str, linkedin_text: str, job_description: str) -> StructuredOutput:
+        """Returns a structured CV object based on PDF resume and LinkedIn exports."""
+        try:
+            # Validate inputs
+            if not resume_text or not resume_text.strip():
+                raise ValueError("Resume text is empty or missing")
+            if not job_description or not job_description.strip():
+                raise ValueError("Job description is empty or missing")
+            
+            llm_input = {
+                "resume_text": resume_text,
+                "linkedin_text": linkedin_text or "",  # Allow empty LinkedIn
+                "job_description": job_description,
+                "format_instructions": self.parser.get_format_instructions()
+            }
 
-        # The LLM produces all structured fields directly
-        final_cv = self.chain.invoke(llm_input)
-
-        return final_cv
+            # The LLM produces all structured fields directly
+            final_cv = self.chain.invoke(llm_input)
+            
+            # Validate the output
+            if not isinstance(final_cv, (dict, StructuredOutput)):
+                raise ValueError("LLM returned invalid response format")
+                
+            return final_cv
+            
+        except Exception as e:
+            logging.error(f"Error generating CV: {e}")
+            # Return a minimal valid structure instead of crashing
+            return StructuredOutput(
+                name="Error - Please Try Again",
+                summary=f"Error occurred during generation: {str(e)[:100]}..."
+            )
 
 
 # -----------------------
@@ -105,4 +129,5 @@ class LLM_Chat:
         """
         prompt = ChatPromptTemplate.from_messages(final_text_prompt)
         chain = prompt | self.llm | StrOutputParser()
-        return chain.invoke({})
+        response = chain.invoke({})
+        return [{"content": response}]

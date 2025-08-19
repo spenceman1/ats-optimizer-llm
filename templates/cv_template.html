@@ -11,19 +11,15 @@
         /* Name & header */
         h1 { font-size: 18pt; margin: 0 0 6px 0; }
         .contact-line { font-size: 11pt; color: #222; margin-bottom: 10px; }
-
-        /* Links in header: show label but hyperlink to full URL */
         .contact-line a { text-decoration: underline; color: #0066cc; }
 
         /* Section headings */
         h2 { font-size: 12pt; margin: 14px 0 6px 0; padding-bottom: 2px; border-bottom: 1px solid #ddd; }
 
-        /* Experience block */
+        /* Experience, projects, volunteering */
         .experience-item, .projects-item, .volunteering-item { margin-bottom: 10px; page-break-inside: avoid; }
         .role-line { font-weight: 700; font-size: 12pt; margin: 0; }
         .role-meta { font-size: 11pt; color: #333; margin: 2px 0 4px 0; }
-
-        /* Ensure bullets stay directly under the role */
         ul { margin: 4px 0 8px 18px; padding: 0; font-size: 11.5pt; }
         li { margin-bottom: 4px; }
 
@@ -43,7 +39,7 @@
     <!-- Name -->
     <h1>{{ structured_result.name }}</h1>
 
-    <!-- Header line (single row) -->
+    <!-- Header line -->
     <div class="contact-line">
         {{ structured_result.email or "" }}
         {% if structured_result.phone %} ∙ {{ structured_result.phone }}{% endif %}
@@ -77,9 +73,9 @@
     {% endfor %}
     {% endif %}
 
-    <!-- Projects -->
+    <!-- Project Experience -->
     {% if structured_result.projects %}
-    <h2>Projects</h2>
+    <h2>Project Experience</h2>
     {% for proj in structured_result.projects %}
     <div class="projects-item">
         <p class="role-line">{{ proj.role or "" }}</p>
@@ -95,9 +91,9 @@
     {% endfor %}
     {% endif %}
 
-    <!-- Volunteering -->
+    <!-- Volunteering Experience -->
     {% if structured_result.volunteering %}
-    <h2>Volunteering</h2>
+    <h2>Volunteering Experience</h2>
     {% for vol in structured_result.volunteering %}
     <div class="volunteering-item">
         <p class="role-line">{{ vol.role or "" }}</p>
@@ -124,19 +120,13 @@
     {% endif %}
 
     <!-- Education & Certifications -->
-    {% if structured_result.education and structured_result.certifications %}
+    {% if structured_result.education or structured_result.certifications %}
         <h2>Education & Certifications</h2>
-    {% elif structured_result.education %}
-        <h2>Education</h2>
-    {% elif structured_result.certifications %}
-        <h2>Certifications</h2>
     {% endif %}
 
     {% for edu in structured_result.education %}
         <div class="education-item">
-            {% if edu.degree %}
-                <strong>{{ edu.degree }}{% if edu.major %}, {{ edu.major }}{% endif %}</strong>
-            {% endif %}
+            {% if edu.degree %}<strong>{{ edu.degree }}{% if edu.major %}, {{ edu.major }}{% endif %}</strong>{% endif %}
             {% if edu.institution %} ∙ {{ edu.institution }}{% endif %}
             {% if edu.graduation_year %} ∙ {{ edu.graduation_year }}{% endif %}
             {% if edu.location %} ∙ {{ edu.location }}{% endif %}
@@ -151,11 +141,7 @@
     {% if structured_result.certifications %}
         {% for cert in structured_result.certifications %}
             <div class="certifications-item">
-                {% if cert.title %}
-                    {{ cert.title }}{% if cert.issuer %} ∙ {{ cert.issuer }}{% endif %}
-                {% else %}
-                    {{ cert }}
-                {% endif %}
+                {% if cert.title %}{{ cert.title }}{% if cert.issuer %} ∙ {{ cert.issuer }}{% endif %}{% else %}{{ cert }}{% endif %}
             </div>
         {% endfor %}
     {% endif %}

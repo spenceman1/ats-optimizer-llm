@@ -189,14 +189,6 @@ def render_and_write_pdf(
     weasyprint.HTML(string=rendered_html).write_pdf(str(out_pdf))
     return out_html, out_pdf
 
-    # Write outputs
-    out_html = out_dir / f"{filename_base}.html"
-    out_pdf = out_dir / f"{filename_base}.pdf"
-    out_html.write_text(rendered_html, encoding="utf-8")
-    weasyprint.HTML(string=rendered_html).write_pdf(str(out_pdf))
-
-    return out_html, out_pdf
-
 # -----------------------
 # Streamlit App
 # -----------------------
@@ -241,6 +233,13 @@ with col_uid:
 with col_name:
     user_name_input = st.text_input("User Name", "")
 
+st.subheader("Optional Profile Links")
+col_web, col_git = st.columns(2)
+with col_web:
+    website_input = st.text_input("Website (full URL)", "", key="website_input")
+with col_git:
+    github_input = st.text_input("GitHub (full URL)", "", key="github_input")
+
 col_a, col_b = st.columns(2)
 with col_a:
     if st.button("Use Existing User"):
@@ -252,11 +251,11 @@ with col_a:
                 rtxt, ltxt = get_user_info(uid)
                 st.session_state.resume_text = rtxt or ""
                 st.session_state.linkedin_text = ltxt or ""
-
-                # Website and GitHub input fields
-                st.session_state.website = st.text_input("Website (full URL)", "")
-                st.session_state.github = st.text_input("GitHub (full URL)", "")
-
+                
+                # Store the profile links in session state
+                st.session_state.website = website_input
+                st.session_state.github = github_input
+                
                 st.success(f"Loaded user {uid}.")
             else:
                 st.warning("User ID does not exist.")
@@ -274,17 +273,15 @@ with col_b:
             elif not (resume_pdf and linkedin_pdf):
                 st.error("Upload both PDFs.")
             else:
-                created = create_user(uid, user_name_input.strip(), resume_pdf, linkedin_pdf)
+                created = create_user(uid, user_name_input.strip(), resume_pdf, linkedin_pdf, 
+                                   website_input, github_input)  # Pass the URLs
                 if created:
                     st.session_state.user_id = uid
                     st.session_state.user_name = user_name_input.strip()
                     st.session_state.resume_text = extract_text_from_pdf(resume_pdf)
                     st.session_state.linkedin_text = extract_text_from_pdf(linkedin_pdf)
-
-                    # New: Website and GitHub input fields for *new* users too
-                    st.session_state.website = st.text_input("Website (full URL)", "")
-                    st.session_state.github = st.text_input("GitHub (full URL)", "")
-
+                    st.session_state.website = website_input
+                    st.session_state.github = github_input
                     st.success(f"User {uid} created.")
         except Exception as e:
             st.error(f"Error creating user: {e}")
@@ -335,33 +332,83 @@ if st.button("Generate with AI"):
         st.warning("Select or create a job first.")
         st.stop()
 
+    # Validate API key
+    try:
+        if not pathlib.Path(API_KEY_FILE).exists():
+            st.error(f"API key file not found: {API_KEY_FILE}")
+            st.stop()
+    except Exception as e:
+        st.error(f"Error checking API key: {e}")
+        st.stop()
+
     # Sidebar toggle for location
     header_location = "Open to relocation"
     if specified_location.strip():
         header_location = specified_location.strip()
 
-    # Initialize agent
-    agent = LLMAgent(api_key_path=str(API_KEY_FILE))  # default model
-
-    # Generate structured resume
+    # Initialize agent with error handling
     try:
-        structured = agent.generate_cv(
-            resume_text=st.session_state.resume_text,
-            linkedin_text=st.session_state.linkedin_text,
-            job_description=st.session_state.selected_job_text
-        )
-        st.session_state.generated_cv = structured  # save for later steps
-    except ValueError as e:
-        st.error(f"Error generating CV: {e}")
+        agent = LLMAgent(api_key_path=str(API_KEY_FILE))
+    except Exception as e:
+        st.error(f"Failed to initialize AI agent: {e}")
         st.stop()
 
-    # Convert to dict if it's a StructuredOutput object
-    if not isinstance(structured, dict):
-        structured_dict = structured.dict()
-    else:
-        structured_dict = structured
+    # Generate structured resume with progress indicator
+    with st.spinner("Generating tailored resume..."):
+        try:
+            structured = agent.generate_cv(
+                resume_text=st.session_state.resume_text,
+                linkedin_text=st.session_state.linkedin_text,
+                job_description=st.session_state.selected_job_text
+            )
+            st.session_state.generated_cv = structured
+            
+            # Check if we got an error structure
+            if hasattr(structured, 'name') and structured.name.startswith("Error"):
+                st.error("AI generation failed. Please try again or check your inputs.")
+                st.stop()
+                
+        except Exception as e:
+            st.error(f"Error generating CV: {e}")
+            st.info("Please check your internet connection, API key, and try again.")
+            st.stop()
 
-    # Render HTML for Step 4 PDF
+    # PDF generation with error handling
+    try:
+        # Convert to dict if it's a StructuredOutput object
+        if not isinstance(structured, dict):
+            structured_dict = structured.dict()
+        else:
+            structured_dict = structured
+    except Exception as e:
+        st.error(f"Error creating PDF: {e}")
+        st.info("The resume was generated but PDF creation failed. You can still view the content below.")
+        # Continue to show the resume content even if PDF fails
+
+
+    # ---- Normalize project & volunteering keys ----
+    for proj in structured_dict.get("projects", []):
+        if "title" in proj and "role" not in proj:
+            proj["role"] = proj.pop("title")
+        if "company" in proj and "organization" not in proj:
+            proj["organization"] = proj.pop("company")
+        if "achievements" not in proj:
+            proj["achievements"] = []
+
+    for vol in structured_dict.get("volunteering", []):
+        if "title" in vol and "role" not in vol:
+            vol["role"] = vol.pop("title")
+        if "company" in vol and "organization" not in vol:
+            vol["organization"] = vol.pop("company")
+        if "achievements" not in vol:
+            vol["achievements"] = []
+
+    # ---- Existing clean-up for achievements ----
+    for section in ["experience", "projects", "volunteering"]:
+        for item in structured_dict.get(section, []) or []:
+            item["achievements"] = [a.replace("\n", " ").strip() for a in item.get("achievements", [])]
+
+    # Render HTML for PDF
     out_html, out_pdf = render_and_write_pdf(
         structured_result=structured_dict,
         header_location=header_location,

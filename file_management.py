@@ -35,7 +35,7 @@ def get_user_info(user_id):
     user = data.get(str(user_id), {})
     return user.get("resume_text", ""), user.get("linkedin_text", "")
 
-def create_user(user_id, name, resume_pdf_file, linkedin_pdf_file):
+def create_user(user_id, name, resume_pdf_file, linkedin_pdf_file, website="", github=""):
     users = _load_json(USERS_FILE, {})
     uid_str = str(user_id)
     if uid_str in users:
@@ -45,7 +45,9 @@ def create_user(user_id, name, resume_pdf_file, linkedin_pdf_file):
     users[uid_str] = {
         "name": name,
         "resume_text": resume_text,
-        "linkedin_text": linkedin_text
+        "linkedin_text": linkedin_text,
+        "website": website,
+        "github": github
     }
     _save_json(USERS_FILE, users)
     return True
