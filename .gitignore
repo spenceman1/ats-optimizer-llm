@@ -28,3 +28,4 @@ DB/postgres_data/
 *.swp
 *.swo
 API_KEY.txt
+/DB

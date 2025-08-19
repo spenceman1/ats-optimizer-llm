@@ -1,307 +1,558 @@
+import os
+import pathlib
+import json
+import re
 import streamlit as st
-import os, time, pathlib, json
 import pandas as pd
 from jinja2 import Environment, FileSystemLoader
 import weasyprint
 
-# INTERNAL LIBRARIES
-from file_management import *
-from state_machine import ResumeOptimizerStateMachine
-from llm_agent import *
+# For richer text editor
+import streamlit_ace
 
-# Add the path to the GTK3 bin folder -> required to run weasyprint
-os.add_dll_directory(r"C:\Program Files\GTK3-Runtime Win64\bin")
+# Internal libraries
+from file_management import (
+    extract_text_from_pdf,
+    get_all_users,
+    check_user_exists,
+    get_user_info,
+    create_user,
+    create_new_job,
+    get_user_jobs,
+    save_dict_in_db,
+    get_chat_history,
+    save_chat_history,
+)
 
-# Initializing the state machine
-if "machine" not in st.session_state:
-    st.session_state.machine = ResumeOptimizerStateMachine()
+from llm_agent import LLMAgent  # LLM wrapper; must accept model_name and api_key_path
 
+# -----------------------
+# Paths
+# -----------------------
+BASE_DIR = pathlib.Path(__file__).resolve().parent
+OUTPUT_DIR = BASE_DIR / "output"
+TEMPLATES_DIR = BASE_DIR / "templates"
+API_KEY_FILE = BASE_DIR / "API_KEY.txt"
+OUTPUT_DIR.mkdir(exist_ok=True)
+(TEMPLATES_DIR / ".keep").touch(exist_ok=True)
+
+# -----------------------
+# Jinja environment
+# -----------------------
+env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)))
+template = env.get_template("cv_template.html")
+
+# -----------------------
+# Helpers
+# -----------------------
+URL_RE = re.compile(r'https?://[^\s)]+', re.IGNORECASE)
+
+def find_links(text: str):
+    return list(set(URL_RE.findall(text or "")))
+
+def pick_profile_links(resume_text: str, linkedin_text: str):
+    all_text = " ".join([resume_text or "", linkedin_text or ""])
+    urls = find_links(all_text)
+    linkedin_url = next((u for u in urls if "linkedin.com" in u.lower()), None)
+    github_url = next((u for u in urls if "github.com" in u.lower()), None)
+    candidates = [u for u in urls if u not in [linkedin_url, github_url]]
+    website_url = candidates[0] if candidates else None
+    return {"linkedin": linkedin_url, "github": github_url, "website": website_url}
+
+def slim_skills(structured_result):
+    """Return master resume style skills"""
+    skills = structured_result.get("skills") or []
+    out = []
+    for s in skills:
+        if isinstance(s, dict) and "skill" in s:
+            out.append(s["skill"])
+        elif isinstance(s, str):
+            out.append(s)
+    seen = set()
+    deduped = []
+    for s in out:
+        if s and s not in seen:
+            seen.add(s)
+            deduped.append(s)
+    return deduped
+
+def ensure_summary_text(structured_result):
+    summary = structured_result.get("summary")
+    if isinstance(summary, dict) and "description" in summary:
+        return summary["description"]
+    if isinstance(summary, str):
+        return summary
+    return ""
+
+def filter_sections(structured_result, include_flags):
+    data = dict(structured_result)
+    if not include_flags.get("volunteer", True):
+        data["volunteering"] = []
+    if not include_flags.get("projects", True):
+        data["projects"] = []
+    return data
+
+def normalize_url(url):
+    return url if url else None
+
+def render_and_write_pdf(
+    structured_result,
+    header_location,
+    out_dir: pathlib.Path,
+    filename_base: str,
+    include_projects: bool = True,
+    include_volunteer: bool = True,
+    resume_text: str = "",
+    linkedin_text: str = ""
+):
+    """
+    Render the structured CV to HTML and PDF using Jinja2 + WeasyPrint.
+    Handles toggles for projects and volunteer sections and auto-fills certifications.
+    """
+    # shallow copy so we do not mutate the original
+    data = dict(structured_result)
+
+    # apply toggles
+    if not include_volunteer:
+        data["volunteering"] = []
+    if not include_projects:
+        data["projects"] = []
+
+    # normalize header fields
+    data["linkedin"] = data.get("linkedin") or None
+    data["github"] = data.get("github") or None
+    data["website"] = data.get("website") or None
+    data["location"] = header_location or data.get("location")
+
+    # ensure certifications key exists
+    if "certifications" not in data or data["certifications"] is None:
+        data["certifications"] = []
+
+    # ---- Auto detect common certifications in raw text ----
+    def extract_certifications(text):
+        found = []
+        if not text:
+            return found
+        txt = text.lower()
+        # simple exact/substring checks for common certs
+        known = [
+            ("Project Management Professional (PMP)", ["pmp", "project management professional"]),
+            ("Export Compliance Certification", ["export compliance", "citi program", "citi"]),
+            ("Certified Scrum Master (CSM)", ["scrum master", "csm"]),
+            ("Lean Six Sigma", ["six sigma", "lean six sigma"]),
+        ]
+        for title, keys in known:
+            for k in keys:
+                if k in txt and title not in [c if isinstance(c, str) else c.get("title") for c in found]:
+                    found.append({"title": title, "issuer": ""})
+                    break
+
+        # fallback: pull short lines that contain "cert" or "certificate"
+        lines = [l.strip(" -•*") for l in re.split(r'[\r\n]+', text) if l.strip()]
+        for line in lines:
+            low = line.lower()
+            if ("cert" in low or "certificate" in low) and len(line) < 120:
+                # avoid adding duplicates
+                if not any((isinstance(c, str) and c == line) or (isinstance(c, dict) and c.get("title") == line) for c in found):
+                    found.append(line)
+        return found
+
+    # merge any auto-detected certs from resume and linkedin text
+    auto = []
+    auto += extract_certifications(resume_text)
+    auto += extract_certifications(linkedin_text)
+
+    # merge into data['certifications'] without duplicates
+    existing_titles = set()
+    cleaned = []
+    for c in data.get("certifications", []) or []:
+        if isinstance(c, dict):
+            t = c.get("title") or ""
+        else:
+            t = str(c)
+        if t and t not in existing_titles:
+            existing_titles.add(t)
+            cleaned.append(c)
+    # add autodetected if missing
+    for ac in auto:
+        title = ac.get("title") if isinstance(ac, dict) else ac
+        if title and title not in existing_titles:
+            cleaned.append(ac)
+            existing_titles.add(title)
+    data["certifications"] = cleaned
+
+    # Render HTML
+    rendered_html = template.render(structured_result=data)
+    out_html = out_dir / f"{filename_base}.html"
+    out_pdf = out_dir / f"{filename_base}.pdf"
+    out_html.write_text(rendered_html, encoding="utf-8")
+    weasyprint.HTML(string=rendered_html).write_pdf(str(out_pdf))
+    return out_html, out_pdf
+
+    # Write outputs
+    out_html = out_dir / f"{filename_base}.html"
+    out_pdf = out_dir / f"{filename_base}.pdf"
+    out_html.write_text(rendered_html, encoding="utf-8")
+    weasyprint.HTML(string=rendered_html).write_pdf(str(out_pdf))
+
+    return out_html, out_pdf
+
+# -----------------------
+# Streamlit App
+# -----------------------
+st.set_page_config(page_title="ATS TAILORING SYSTEM (LLM)", layout="wide")
 st.title("ATS TAILORING SYSTEM (LLM)")
 
-machine = st.session_state.machine
+# Sidebar: Model & Toggles
+st.sidebar.header("Settings")
 
-# Create output directory if not exists
-output_path = pathlib.Path("output")
-output_path.mkdir(exist_ok=True)
-(output_path/".gitkeep").touch(exist_ok=True)
+st.sidebar.subheader("Sections")
+include_volunteer = st.sidebar.checkbox("Include Volunteer Experience", value=False)
+include_projects = st.sidebar.checkbox("Include Project Experience", value=True)
 
-# --- GLOBAL VARIABLES USED FOR PDF GENERATION ----------
-output_dir = pathlib.Path("output")   # relative path
-template_dir = pathlib.Path("templates")   # relative path
+st.sidebar.subheader("Location")
+location_mode = st.sidebar.radio("Header Location", ["Open to relocation", "Specific location"], index=0)
+specified_location = ""
+if location_mode == "Specific location":
+    specified_location = st.sidebar.text_input("Location (e.g., Glendale, CA)", value="")
 
-# SETTING UP JINJA2 ENVIRONMENT
-env = Environment(loader=FileSystemLoader(template_dir))
-template = env.get_template('cv_template.html')  # Custom-made HTML template
+# API key
+api_key_path_input = st.sidebar.text_input("Path to API key file", value=str(API_KEY_FILE))
 
-# --- CONTROL STATE INITIALIZATIONS ---
-session_vars = [
-    "user_checked", "user_exists", "user_confirmed",
-    "user_name", "job_id", "resume_text", "linkedin_text",
-    "generated_cv", "chat_history"
-]
+# Streamlit session state
+for key in ["user_id","user_name","resume_text","linkedin_text","job_id","selected_job_text","generated_cv","rendered_html","chat_history"]:
+    if key not in st.session_state:
+        st.session_state[key] = None if key=="generated_cv" else "" if key=="rendered_html" else []
 
-for var in session_vars:
-    if var not in st.session_state:
-        if var == "chat_history":
-            st.session_state[var] = []
-        elif "text" in var or "name" in var:
-            st.session_state[var] = None
-        else:
-            st.session_state[var] = False
+# -----------------------
+# Step 1: User selection/creation
+# -----------------------
+st.header("1) Choose or Create a User")
+all_users = get_all_users()
+if all_users:
+    df_users = pd.DataFrame(all_users, columns=["User ID","Created"])
+    st.dataframe(df_users, hide_index=True, use_container_width=True)
+else:
+    st.info("No users yet.")
 
-starting_chat_prompt_model = """You are a helpful assistant specialized in career assistance.Your goal is to provide clear,
-actionable, and practical advice to help users present themselves at their best,
-land interviews, and succeed in their career transitions.
-Take the following information as reference for the candidate and opportunity.
+col_uid, col_name = st.columns([1,2])
+with col_uid:
+    user_id_input = st.text_input("User ID", "")
+with col_name:
+    user_name_input = st.text_input("User Name", "")
 
---- Candidate Resume ---
-{resume_text}
-
---- Linkedin Export ---
-{linkedin_text}
-
---- Job Description ---
-{job_description}
-"""
-
-API_KEY_PATH = pathlib.Path("API_KEY.txt")  # relative path
-
-# ------------------------------------
-# APP FUNCTIONS
-# ------------------------------------
-def display_jobs_with_selection(user_jobs):
-    if not user_jobs:
-        st.info("No existing jobs found for this user")
-        return None
-
-    jobs_df = pd.DataFrame(user_jobs,
-                           columns=["ID", "Description", "Generated CV", "Created", "Last Modified"])
-
-    st.dataframe(
-        jobs_df,
-        column_config={
-            "ID": st.column_config.NumberColumn(width="small"),
-            "Description": st.column_config.TextColumn(width="large"),
-            "Generated CV": st.column_config.JsonColumn(),
-            "Created": st.column_config.DatetimeColumn(),
-            "Last Modified": st.column_config.DatetimeColumn()
-        },
-        hide_index=True,
-        use_container_width=True
-    )
-
-    selected_id = st.selectbox(
-        "Select job:",
-        options=jobs_df["ID"].tolist(),
-        format_func=lambda x: f"Job {x} - {jobs_df[jobs_df['ID'] == x]['Description'].iloc[0][:50]}..."
-    )
-
-    if st.button("Confirm Job Selection"):
-        return selected_id
-    return None
-
-def show_loading_state():
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-
-    for i in range(100):
-        progress_bar.progress(i + 1)
-        status_text.text(f"Generating optimized CV... {i + 1}%")
-        time.sleep(0.03)
-
-    progress_bar.empty()
-    status_text.empty()
-
-# --- STEP 1: USER SELECTION ---
-if machine.state == "start":
-
-    user_name = st.text_input("Enter an user name for this configuration:")
-
-    st.subheader("Existing Users")
-    all_users = get_all_users()
-
-    if all_users:
-        users_df = pd.DataFrame(all_users, columns=["User ID", "Last Modified"])
-        users_df["Last Modified"] = pd.to_datetime(users_df["Last Modified"]).dt.strftime('%Y-%m-%d %H:%M')
-
-        st.dataframe(
-            users_df,
-            column_config={
-                "User ID": st.column_config.TextColumn(width="medium"),
-                "Last Modified": st.column_config.DatetimeColumn(width="medium")
-            },
-            hide_index=True,
-            use_container_width=True
-        )
-    else:
-        st.info("No existing users found in the database")
-
-    if user_name and not st.session_state.user_checked:
-        user_exists = check_user_exists(user_name)
-        st.session_state.user_exists = user_exists
-        st.session_state.user_checked = True
-
-    if user_name:
-        user_exists_count = check_user_exists(user_name) or 0
-        if user_exists_count > 0:
-            st.warning(f"⚠️ User '{user_name}' already exists. Continuing with existing data?")
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("✅ Yes, continue"):
-                    st.session_state.user_name = user_name
-                    st.session_state.resume_text, st.session_state.linkedin_text = get_user_info(st.session_state.user_name)
-                    st.session_state.user_confirmed = True
-                    message = machine.next("select_user")
-                    st.success(message)
-                    st.rerun()
-
-            with col2:
-                if st.button("❌ No, input a new user"):
-                    st.session_state.user_checked = False
-                    st.session_state.user_exists = False
-                    st.rerun()
-
-        else:
-            st.info(f"User '{user_name}' selected. Please, input your updated Resume PDF and Linkedin Export PDF to create your profile.")
-
-            resume_pdf = st.file_uploader("Resume PDF", type=["pdf"])
-            linkedin_pdf = st.file_uploader("Linkedin Default PDF Export", type=["pdf"])
-
-            if resume_pdf and linkedin_pdf and user_name is not None:
-                if st.button("📤 Upload & Continue", type="primary"):
-                    try:
-                        st.session_state.resume_text = extract_text_from_pdf(resume_pdf)
-                        st.session_state.linkedin_text = extract_text_from_pdf(linkedin_pdf)
-                        create_user(user_name, resume_pdf, linkedin_pdf)
-                        st.session_state.user_name = user_name
-                        message = machine.next("select_user")
-                        st.success(message)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error creating user: {e}")
-
-# --- STEP 2: JOB SELECTION ---
-elif machine.state == "waiting_job_description":
-
-    st.subheader("Select a Job Description for optimization:")
-    user_jobs = get_user_jobs(st.session_state.user_name)
-
-    with st.expander("➕ Create New Job", expanded=True):
-        new_job_text = st.text_area("Paste job description here:", height=200)
-        if st.button("Save New Job"):
-            if new_job_text.strip():
-                try:
-                    job_id = create_new_job(st.session_state.user_name, new_job_text)
-                    st.session_state.selected_job_text = new_job_text
-                    st.session_state.job_id = job_id
-                    message = machine.next("job_description_uploaded")
-                    st.success(message)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error saving job: {e}")
-            else:
-                st.warning("Please enter a job description")
-
-    st.subheader("Or select a previous Job configuration:")
-    selected_id = display_jobs_with_selection(user_jobs)
-
-    if selected_id:
-        selected_job = next(job for job in user_jobs if job[0] == selected_id)
-        st.session_state.job_id = selected_id
-        st.session_state.selected_job_text = selected_job[1]
-        message = machine.next("job_description_uploaded")
-        st.success(f"Selected Job {selected_id}. {message}")
-        st.rerun()
-
-# --- STEP 3: PROCESSING LLM ---
-elif machine.state == "processing_llm":
-    st.subheader("Processing your data")
-    with st.spinner("Initializing AI engine..."):
-        time.sleep(1)
-        show_loading_state()
+col_a, col_b = st.columns(2)
+with col_a:
+    if st.button("Use Existing User"):
         try:
-            llm_agent = LLMAgent(API_KEY_PATH)
-            result = llm_agent.generate_cv(
-                st.session_state.user_name,
-                st.session_state.resume_text,
-                st.session_state.linkedin_text,
-                st.session_state.selected_job_text
+            uid = int(user_id_input)
+            if check_user_exists(uid):
+                st.session_state.user_id = uid
+                st.session_state.user_name = user_name_input or f"User {uid}"
+                rtxt, ltxt = get_user_info(uid)
+                st.session_state.resume_text = rtxt or ""
+                st.session_state.linkedin_text = ltxt or ""
+
+                # Website and GitHub input fields
+                st.session_state.website = st.text_input("Website (full URL)", "")
+                st.session_state.github = st.text_input("GitHub (full URL)", "")
+
+                st.success(f"Loaded user {uid}.")
+            else:
+                st.warning("User ID does not exist.")
+        except:
+            st.error("Enter numeric User ID.")
+
+with col_b:
+    resume_pdf = st.file_uploader("Resume PDF", type=["pdf"], key="resume_pdf")
+    linkedin_pdf = st.file_uploader("LinkedIn PDF", type=["pdf"], key="linkedin_pdf")
+    if st.button("Create New User"):
+        try:
+            uid = int(user_id_input)
+            if not user_name_input.strip():
+                st.error("Enter a User Name.")
+            elif not (resume_pdf and linkedin_pdf):
+                st.error("Upload both PDFs.")
+            else:
+                created = create_user(uid, user_name_input.strip(), resume_pdf, linkedin_pdf)
+                if created:
+                    st.session_state.user_id = uid
+                    st.session_state.user_name = user_name_input.strip()
+                    st.session_state.resume_text = extract_text_from_pdf(resume_pdf)
+                    st.session_state.linkedin_text = extract_text_from_pdf(linkedin_pdf)
+
+                    # New: Website and GitHub input fields for *new* users too
+                    st.session_state.website = st.text_input("Website (full URL)", "")
+                    st.session_state.github = st.text_input("GitHub (full URL)", "")
+
+                    st.success(f"User {uid} created.")
+        except Exception as e:
+            st.error(f"Error creating user: {e}")
+
+st.divider()
+
+# -----------------------
+# Step 2: Job selection/creation
+# -----------------------
+st.header("2) Select or Create a Job Description")
+if not st.session_state.user_id:
+    st.info("Select or create a user first."); st.stop()
+
+jobs = get_user_jobs(st.session_state.user_id)
+if jobs:
+    jobs_df = pd.DataFrame(jobs, columns=["Job ID","Description","Generated CV","Created","Updated"])
+    st.dataframe(jobs_df[["Job ID","Description","Created","Updated"]], hide_index=True, use_container_width=True)
+    chosen = st.selectbox("Pick existing job",[j[0] for j in jobs], format_func=lambda jid: f"Job {jid}")
+    if st.button("Load Job"):
+        st.session_state.job_id = chosen
+        row = next(j for j in jobs if j[0]==chosen)
+        st.session_state.selected_job_text = row[1] or ""
+        st.success(f"Loaded job {chosen}.")
+
+st.subheader("Or create a new job")
+new_jd = st.text_area("Paste job description", height=180, key="jd_text")
+if st.button("Save New Job"):
+    if not new_jd.strip():
+        st.warning("Paste a job description first.")
+    else:
+        try:
+            jid = create_new_job(st.session_state.user_id,new_jd.strip())
+            st.session_state.job_id = jid
+            st.session_state.selected_job_text = new_jd.strip()
+            st.success(f"Created job {jid}.")
+        except Exception as e:
+            st.error(f"Error saving job: {e}")
+
+st.divider()
+
+# -----------------------
+# Step 3: Generate Tailored Resume
+# -----------------------
+st.header("3) Generate Tailored Resume")
+
+if st.button("Generate with AI"):
+    if not st.session_state.selected_job_text.strip():
+        st.warning("Select or create a job first.")
+        st.stop()
+
+    # Sidebar toggle for location
+    header_location = "Open to relocation"
+    if specified_location.strip():
+        header_location = specified_location.strip()
+
+    # Initialize agent
+    agent = LLMAgent(api_key_path=str(API_KEY_FILE))  # default model
+
+    # Generate structured resume
+    try:
+        structured = agent.generate_cv(
+            resume_text=st.session_state.resume_text,
+            linkedin_text=st.session_state.linkedin_text,
+            job_description=st.session_state.selected_job_text
+        )
+        st.session_state.generated_cv = structured  # save for later steps
+    except ValueError as e:
+        st.error(f"Error generating CV: {e}")
+        st.stop()
+
+    # Convert to dict if it's a StructuredOutput object
+    if not isinstance(structured, dict):
+        structured_dict = structured.dict()
+    else:
+        structured_dict = structured
+
+    # Render HTML for Step 4 PDF
+    out_html, out_pdf = render_and_write_pdf(
+        structured_result=structured_dict,
+        header_location=header_location,
+        out_dir=OUTPUT_DIR,
+        filename_base=f"Resume_{st.session_state.user_id}_{st.session_state.job_id}",
+        include_projects=include_projects,
+        include_volunteer=include_volunteer,
+        resume_text=st.session_state.get("resume_text",""),
+        linkedin_text=st.session_state.get("linkedin_text","")
+    )
+
+    # -----------------------
+    # Header
+    # -----------------------
+    links = pick_profile_links(st.session_state.resume_text, st.session_state.linkedin_text)
+    linkedin_link = links.get("linkedin")
+    github_link = links.get("github")
+    website_link = links.get("website")
+
+    st.markdown(f"**{structured_dict.get('name','Unknown Name')}**  ")
+    st.markdown(f"Email: {structured_dict.get('email','unknown@example.com')}  ")
+    st.markdown(f"Phone: {structured_dict.get('phone','000-000-0000')}  ")
+    if linkedin_link:
+        st.markdown(f"[LinkedIn]({linkedin_link})  ")
+    if github_link:
+        st.markdown(f"[GitHub]({github_link})  ")
+    elif website_link:
+        st.markdown(f"[Website]({website_link})  ")
+    st.markdown(f"Location: {header_location}  ")
+
+    # -----------------------
+    # Summary
+    # -----------------------
+    st.markdown("**Summary**")
+    summary_text = ensure_summary_text(structured_dict)
+    st.markdown(summary_text or "Professional with relevant experience and skills aligned to the target job description.")
+
+    # -----------------------
+    # Professional Experience
+    # -----------------------
+    st.markdown("**Professional Experience**")
+    for exp in structured_dict.get("experience", []) or []:
+        role = exp.get("role","N/A")
+        company = exp.get("company","N/A")
+        start_date = exp.get("start_date","")
+        end_date = exp.get("end_date","")
+        location = exp.get("location","N/A")
+        st.markdown(f"**{role}** | {company} | {start_date} - {end_date} | {location}")
+        for bullet in exp.get("achievements",[]) or []:
+            st.markdown(f"- {bullet}")
+
+    # -----------------------
+    # Project Experience
+    # -----------------------
+    st.markdown("**Project Experience**")
+    for proj in structured_dict.get("projects",[]) or []:
+        role = proj.get("role","N/A")
+        org = proj.get("organization","N/A")
+        start_date = proj.get("start_date","")
+        end_date = proj.get("end_date","")
+        location = proj.get("location","N/A")
+        st.markdown(f"**{role}** | {org} | {start_date} - {end_date} | {location}")
+        for bullet in proj.get("achievements",[]) or []:
+            st.markdown(f"- {bullet}")
+
+    # -----------------------
+    # Skills
+    # -----------------------
+    st.markdown("**Skills**")
+    skills_list = slim_skills(structured_dict)
+    if isinstance(skills_list, list):
+        st.markdown(", ".join(skills_list))
+    elif isinstance(skills_list, dict):
+        for category, items in skills_list.items():
+            st.markdown(f"**{category}:** {', '.join(items)}")
+
+    # -----------------------
+    # Education & Certifications
+    # -----------------------
+    st.markdown("**Education & Certifications**")
+    for edu in structured_dict.get("education",[]) or []:
+        degree = edu.get("degree","N/A")
+        institution = edu.get("institution","N/A")
+        year = edu.get("graduation_year","N/A")
+        loc = edu.get("location","N/A")
+        st.markdown(f"**{degree}** | {institution} | {year} | {loc}")
+        achievements = edu.get("achievements","")
+        if achievements:
+            st.markdown(f"- {achievements}")
+    for course in structured_dict.get("courses",[]) or []:
+        cname = course.get("course","N/A")
+        inst = course.get("institution","N/A")
+        year = course.get("graduation_year","N/A")
+        st.markdown(f"{cname} | {inst} | {year}")
+
+    # Show download PDF button
+    out_pdf = OUTPUT_DIR / f"Resume_{st.session_state.user_id}_{st.session_state.job_id}.pdf"
+    if out_pdf.exists():
+        with open(out_pdf,"rb") as f:
+            st.download_button(
+                "Download PDF",
+                data=f.read(),
+                file_name=out_pdf.name,
+                mime="application/pdf"
             )
 
-            st.session_state.generated_cv = result
-            save_dict_in_db(st.session_state.user_name, st.session_state.job_id, json.dumps(result))
+# -----------------------
+# Step 4: Edit & Re-make PDF
+# -----------------------
+st.header("4) Edit & Re-make PDF")
 
-            rendered_html = template.render(st.session_state.generated_cv)
-            output_html_path = output_dir / 'output_cv.html'
-            with open(output_html_path, 'w', encoding="utf-8") as f:
-                f.write(rendered_html)
-
-            output_pdf_path = output_dir / f'Resume_{st.session_state.user_name}_{st.session_state.job_id}.PDF'
-            weasyprint.HTML(string=rendered_html).write_pdf(output_pdf_path)
-
-            message = machine.next("finished")
-            st.success(message)
-            st.rerun()
-
-        except Exception as e:
-            st.error(f"Generation failed: {str(e)}")
-            machine.state = "waiting_job_description"
-
-# --- STEP 4: CHAT & DOWNLOAD ---
-elif machine.state == "job_exploration":
-
-    empty_col, button_col = st.columns([0.95, 0.05])
-    with button_col:
-        if st.button("↩️", help="Return to main menu"):
-            st.session_state.clear()
-            machine.next("menu")
-            st.rerun()
-
-    st.subheader("Download your Tailored Resume & Chat")
-
-    output_pdf_path = output_dir / f'Resume_{st.session_state.user_name}_{st.session_state.job_id}.PDF'
-    with open(output_pdf_path, "rb") as pdf_file:
-        pdf_data = pdf_file.read()
-    st.download_button(
-        label="📄 Download Your Tailored Resume (PDF)",
-        data=pdf_data,
-        file_name=f"Tailored_Resume_{st.session_state.user_name}.pdf",
-        mime="application/pdf"
+if st.session_state.generated_cv:
+    st.caption(
+        "Edit the HTML below to make small tweaks or remove sections (e.g., certifications). "
+        "Then click Rebuild PDF."
     )
 
-    st.divider()
+    # Use ACE editor for a richer editing experience
+    import streamlit_ace as st_ace
 
-    st.subheader("💬 Chat with llama-3.3-70b-versatile")
+    st.session_state.rendered_html = st_ace.st_ace(
+        value=st.session_state.rendered_html or "",
+        language="html",
+        theme="chrome",
+        height=400,
+        key="html_editor"
+    )
 
+    if st.button("Rebuild PDF"):
+        try:
+            filename_base = f"Resume_{st.session_state.user_id}_{st.session_state.job_id}"
+            out_pdf = OUTPUT_DIR / f"{filename_base}.pdf"
+            weasyprint.HTML(string=st.session_state.rendered_html).write_pdf(str(out_pdf))
+
+            with open(out_pdf, "rb") as f:
+                st.download_button(
+                    "Download Updated PDF",
+                    data=f.read(),
+                    file_name=out_pdf.name,
+                    mime="application/pdf"
+                )
+            st.success("Updated PDF generated.")
+        except Exception as e:
+            st.error(f"Rebuild failed: {e}")
+else:
+    st.info("Generate a resume first to enable editing.")
+
+# -----------------------
+# Step 5: Chat about this resume
+# -----------------------
+st.header("5) Chat about this resume")
+
+if st.session_state.job_id:
+    # Load chat history from DB if empty
     if not st.session_state.chat_history:
-        db_chat_history = get_chat_history(st.session_state.user_name, st.session_state.job_id)
-        st.session_state.chat_history = db_chat_history if db_chat_history else [
-            {"role": "system", "content": starting_chat_prompt_model.format(
-                resume_text=st.session_state.resume_text,
-                linkedin_text=st.session_state.linkedin_text,
-                job_description=st.session_state.selected_job_text
-            )}
-        ]
+        st.session_state.chat_history = [{"role":"assistant","content":"Hello! Ask me about tailoring your resume or interview prep."}]
 
-    llm_chat_agent = LLM_Chat(API_KEY_PATH)
+    # Display chat messages
+    for msg in st.session_state.chat_history:
+        if msg.get("role") in ("user", "assistant") and msg.get("content"):
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
 
-    for message in st.session_state.chat_history:
-        if message["role"] != "system":
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
-
-    if prompt := st.chat_input("How can I help you today?"):
-        st.session_state.chat_history.append({"role": "user", "content": prompt})
+    # Chat input
+    user_msg = st.chat_input("Ask for improvements, tailoring tips, or interview prep")
+    if user_msg:
+        st.session_state.chat_history.append({"role": "user", "content": user_msg})
         with st.chat_message("user"):
-            st.markdown(prompt)
+            st.markdown(user_msg)
 
-        assistant_response = llm_chat_agent.get_chat_answer(final_text_prompt=st.session_state.chat_history)
-        st.session_state.chat_history.append({"role": "assistant", "content": assistant_response})
+        # Generate assistant response using LLMAgent chat if available
+        try:
+            agent_chat = LLM_Chat(api_key_path=str(API_KEY_FILE))
+            # Example prompt: include user's message and current CV content
+            prompt_messages = [
+                {"role": "system", "content": "You are a professional career assistant. Provide suggestions based on the user's CV."},
+                {"role": "user", "content": f"{user_msg}\n\nHere is the current CV:\n{st.session_state.generated_cv}"}
+            ]
+            assistant_reply = agent_chat.get_chat_answer(prompt_messages)[0].get("content", "")
+        except Exception:
+            # Fallback if chat agent fails
+            assistant_reply = "Got it! (LLMAgent chat is not available.)"
 
-        save_chat_history(
-            user_id=st.session_state.user_name,
-            job_id=st.session_state.job_id,
-            chat_history=json.dumps(st.session_state.chat_history)
-        )
+        st.session_state.chat_history.append({"role": "assistant", "content": assistant_reply})
+        with st.chat_message("assistant"):
+            st.markdown(assistant_reply)
 
-        st.rerun()
+        # Save chat history to DB
+        try:
+            save_chat_history(st.session_state.user_id, st.session_state.job_id, st.session_state.chat_history)
+        except Exception:
+            pass
+else:
+    st.info("Select or create a job to enable chat.")
