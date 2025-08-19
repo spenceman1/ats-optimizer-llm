@@ -373,6 +373,9 @@ if st.button("Generate with AI"):
         linkedin_text=st.session_state.get("linkedin_text","")
     )
 
+    # Save rendered HTML into session state for Step 4 editor
+    st.session_state.rendered_html = out_html.read_text(encoding="utf-8")
+
     # -----------------------
     # Header
     # -----------------------
@@ -432,6 +435,15 @@ if st.button("Generate with AI"):
     # -----------------------
     st.markdown("**Skills**")
     skills_list = slim_skills(structured_dict)
+
+    # Tailor skills to job description
+    def tailor_skills_to_job(skills_list, job_description):
+        jd_lower = job_description.lower()
+        filtered = [s for s in skills_list if s.lower() in jd_lower or True]  # keep all if no match
+        return filtered
+
+    skills_list = tailor_skills_to_job(skills_list, st.session_state.selected_job_text)
+
     if isinstance(skills_list, list):
         st.markdown(", ".join(skills_list))
     elif isinstance(skills_list, dict):
@@ -482,8 +494,19 @@ if st.session_state.generated_cv:
     # Use ACE editor for a richer editing experience
     import streamlit_ace as st_ace
 
+    # Load the latest rendered HTML if available
+    html_to_edit = st.session_state.rendered_html
+    if not html_to_edit and st.session_state.generated_cv:
+        # Use latest HTML from PDF render
+        filename_base = f"Resume_{st.session_state.user_id}_{st.session_state.job_id}"
+        out_html = OUTPUT_DIR / f"{filename_base}.html"
+        if out_html.exists():
+            html_to_edit = out_html.read_text(encoding="utf-8")
+        st.session_state.rendered_html = html_to_edit
+
+    # ACE editor
     st.session_state.rendered_html = st_ace.st_ace(
-        value=st.session_state.rendered_html or "",
+        value=st.session_state.rendered_html,
         language="html",
         theme="chrome",
         height=400,

@@ -48,6 +48,7 @@ class StructuredOutput(BaseModel):
 
     summary: Optional[str] = None
     experience: List[Experience] = Field(default_factory=list)
+    volunteering: List[Project] = Field(default_factory=list)
     projects: List[Project] = Field(default_factory=list)
     skills: List = Field(default_factory=list)
     education: List[Education] = Field(default_factory=list)
@@ -80,6 +81,20 @@ def map_input_to_structured_output(parsed_data: dict) -> StructuredOutput:
                     end_date=exp.get("end_date"),
                     location=exp.get("location"),
                     achievements=exp.get("achievements") or [],
+                )
+            )
+
+    volunteering = []
+    for vol in safe_list(parsed_data.get("volunteering", [])):
+        if isinstance(vol, dict):
+            volunteering.append(
+                Project(
+                    role=vol.get("role",""),
+                    organization=vol.get("organization",""),
+                    start_date=vol.get("start_date"),
+                    end_date=vol.get("end_date"),
+                    location=vol.get("location"),
+                    achievements=vol.get("achievements") or [],
                 )
             )
 
