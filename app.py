@@ -25,6 +25,8 @@ from file_management import (
 from llm_agent import LLMAgent  # LLM wrapper
 from llm_agent import LLM_Chat  # Optional chat wrapper
 
+from resume_optimizer import ResumeOptimizer
+
 # -----------------------
 # Paths
 # -----------------------
@@ -144,6 +146,62 @@ def clean_text_fields(cv_dict):
 
     return cv_dict
 
+def extract_titular_certifications(structured_dict):
+    """Extract certifications that should appear after the name"""
+    titular_certs = {
+        "PMP": ["pmp", "project management professional"],
+        "CSM": ["csm", "certified scrum master"],
+        "CPA": ["cpa", "certified public accountant"],
+        "MBA": ["mba", "master of business administration"],
+        "PHR": ["phr", "professional in human resources"],
+        "CFA": ["cfa", "chartered financial analyst"],
+        "PE": ["pe", "professional engineer"],
+        "PMI-ACP": ["pmi-acp", "agile certified practitioner"],
+        "CISSP": ["cissp", "certified information systems security professional"],
+        "Six Sigma": ["six sigma black belt", "six sigma green belt"]
+    }
+    
+    found_titular = []
+    certifications = structured_dict.get("certifications", [])
+    
+    for cert in certifications:
+        cert_text = ""
+        if isinstance(cert, dict):
+            cert_text = (cert.get("title", "") + " " + cert.get("issuer", "")).lower()
+        else:
+            cert_text = str(cert).lower()
+        
+        for abbrev, keywords in titular_certs.items():
+            if any(keyword in cert_text for keyword in keywords):
+                found_titular.append(abbrev)
+                break
+    
+    return list(set(found_titular))  # Remove duplicates
+
+def format_name_with_certifications(name, certifications):
+    """Add certifications after the name"""
+    if not certifications:
+        return name
+    cert_string = ", ".join(certifications)
+    return f"{name}, {cert_string}"
+
+def has_relevant_certifications(structured_dict):
+    """Check if there are any certifications to display"""
+    certifications = structured_dict.get("certifications", [])
+    if not certifications:
+        return False
+    
+    # Filter out empty certifications
+    valid_certs = []
+    for cert in certifications:
+        if isinstance(cert, dict):
+            if cert.get("title") and cert.get("title").strip():
+                valid_certs.append(cert)
+        elif isinstance(cert, str) and cert.strip():
+            valid_certs.append(cert)
+    
+    return len(valid_certs) > 0
+
 def render_and_write_pdf(
     structured_result,
     header_location,
@@ -155,17 +213,28 @@ def render_and_write_pdf(
     linkedin_text: str = ""
 ):
     data = dict(structured_result)
+    
+    # Extract titular certifications before processing
+    titular_certs = extract_titular_certifications(data)
+    
+    # Update name with certifications
+    original_name = data.get("name", "Unknown Name")
+    data["name"] = format_name_with_certifications(original_name, titular_certs)
+    
     if not include_volunteer:
         data["volunteering"] = []
     if not include_projects:
         data["projects"] = []
+    
     data["linkedin"] = data.get("linkedin") or None
     data["github"] = data.get("github") or None
     data["website"] = data.get("website") or None
     data["location"] = header_location or data.get("location")
+    
     if "certifications" not in data or data["certifications"] is None:
         data["certifications"] = []
 
+    # Existing certification extraction logic...
     def extract_certifications(text):
         found = []
         if not text:
@@ -176,34 +245,45 @@ def render_and_write_pdf(
             ("Export Compliance Certification", ["export compliance", "citi program", "citi"]),
             ("Certified Scrum Master (CSM)", ["scrum master", "csm"]),
             ("Lean Six Sigma", ["six sigma", "lean six sigma"]),
+            ("Certified Information Systems Security Professional (CISSP)", ["cissp"]),
+            ("Professional in Human Resources (PHR)", ["phr"]),
+            ("Chartered Financial Analyst (CFA)", ["cfa"])
         ]
         for title, keys in known:
             for k in keys:
                 if k in txt and title not in [c if isinstance(c,str) else c.get("title") for c in found]:
                     found.append({"title": title, "issuer": ""})
                     break
+        
+        # Look for certification patterns in text
         lines = [l.strip(" -•*") for l in re.split(r'[\r\n]+', text) if l.strip()]
         for line in lines:
             low = line.lower()
-            if ("cert" in low or "certificate" in low) and len(line) < 120:
+            if ("cert" in low or "certificate" in low or "certification" in low) and len(line) < 120:
                 if not any((isinstance(c,str) and c==line) or (isinstance(c,dict) and c.get("title")==line) for c in found):
-                    found.append(line)
+                    found.append({"title": line.strip(), "issuer": ""})
         return found
 
     auto = extract_certifications(resume_text) + extract_certifications(linkedin_text)
     existing_titles = set()
     cleaned = []
+    
     for c in data.get("certifications", []) or []:
         t = c.get("title") if isinstance(c, dict) else str(c)
-        if t and t not in existing_titles:
+        if t and t.strip() and t not in existing_titles:
             existing_titles.add(t)
             cleaned.append(c)
+    
     for ac in auto:
         title = ac.get("title") if isinstance(ac, dict) else ac
-        if title and title not in existing_titles:
+        if title and title.strip() and title not in existing_titles:
             cleaned.append(ac)
             existing_titles.add(title)
+    
     data["certifications"] = cleaned
+    
+    # Add flag for template to know if certifications exist
+    data["has_certifications"] = has_relevant_certifications(data)
 
     rendered_html = template.render(structured_result=data)
     out_html = out_dir / f"{filename_base}.html"
@@ -343,8 +423,6 @@ st.divider()
 # -----------------------
 # Step 3: Generate Tailored Resume
 # -----------------------
-st.header("3) Generate Tailored Resume")
-
 if st.button("Generate with AI"):
     if not st.session_state.selected_job_text.strip():
         st.warning("Select or create a job first.")
@@ -370,19 +448,25 @@ if st.button("Generate with AI"):
     # Generate structured resume
     with st.spinner("Generating tailored resume..."):
         try:
-            prompt_instructions = """
-            Parse the user's resume and LinkedIn content into structured JSON with keys:
-            name, email, phone, linkedin, github, website, location, summary,
-            experience, projects, volunteering, skills, education, certifications.
-
-            Always include 'projects' and 'volunteering', even if empty.
+            # Enhanced prompt for better job matching
+            enhanced_prompt = f"""
+            Parse the user's resume and LinkedIn content into structured JSON.
+            FOCUS ON: Skills, experiences, and projects most relevant to this job description.
+            
+            Job Requirements Analysis:
+            {st.session_state.selected_job_text}
+            
+            Instructions:
+            - Prioritize experience and skills that match the job requirements
+            - Include 'projects' and 'volunteering' sections, even if empty
+            - Extract ALL certifications mentioned in the source documents
+            - Focus on quantifiable achievements and relevant technical skills
             """
-            job_with_instructions = prompt_instructions + "\n\nJob Description:\n" + st.session_state.selected_job_text
 
             structured = agent.generate_cv(
                 resume_text=st.session_state.resume_text,
                 linkedin_text=st.session_state.linkedin_text,
-                job_description=job_with_instructions
+                job_description=enhanced_prompt
             )
 
             if not structured:
@@ -399,7 +483,35 @@ if st.button("Generate with AI"):
             else:
                 structured_dict = structured
 
+            # Clean text fields
             structured_dict = clean_text_fields(structured_dict)
+            
+            # Apply resume optimization
+            if st.checkbox("🎯 Optimize for Job Relevance & Length", value=True, 
+                          help="Automatically optimize resume for the job description and one-page format"):
+                optimizer = ResumeOptimizer()
+                
+                original_skills_count = len(structured_dict.get('skills', []))
+                original_projects_count = len(structured_dict.get('projects', []))
+                
+                # Apply optimization
+                structured_dict = optimizer.optimize_resume(
+                    structured_dict, 
+                    st.session_state.selected_job_text
+                )
+                
+                optimized_skills_count = len(structured_dict.get('skills', []))
+                optimized_projects_count = len(structured_dict.get('projects', []))
+                
+                # Show optimization summary
+                st.info(f"""
+                ✅ **Optimization Applied:**
+                - Skills: Focused on {optimized_skills_count} most relevant (from {original_skills_count})
+                - Projects: Showing {optimized_projects_count} most relevant (from {original_projects_count})
+                - Achievements: Prioritized based on job requirements
+                - Format: Optimized for one-page length
+                """)
+            
             st.session_state.generated_cv = structured_dict
 
         except Exception as e:
@@ -411,7 +523,7 @@ if st.button("Generate with AI"):
     structured_dict.setdefault("projects", [])
     structured_dict.setdefault("volunteering", [])
 
-    # PDF generation
+    # PDF generation with improved certification handling
     try:
         out_html, out_pdf = render_and_write_pdf(
             structured_result=structured_dict,
@@ -424,16 +536,33 @@ if st.button("Generate with AI"):
             linkedin_text=st.session_state.get("linkedin_text", "")
         )
         st.session_state.rendered_html = out_html.read_text(encoding="utf-8")
+        
+        # Display generated content preview
+        st.success("✅ Resume generated successfully!")
+        
+        # Show key metrics
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Experience", len(structured_dict.get('experience', [])))
+        with col2:
+            st.metric("Projects", len(structured_dict.get('projects', [])))
+        with col3:
+            st.metric("Skills", len(structured_dict.get('skills', [])))
+        with col4:
+            st.metric("Certifications", len([c for c in structured_dict.get('certifications', []) if c]))
+        
         # Show download PDF button
         out_pdf_path = OUTPUT_DIR / f"Resume_{st.session_state.user_id}_{st.session_state.job_id}.pdf"
         if out_pdf_path.exists():
             with open(out_pdf_path, "rb") as f:
                 st.download_button(
-                    "Download PDF",
+                    "📥 Download PDF Resume",
                     data=f.read(),
                     file_name=out_pdf_path.name,
-                    mime="application/pdf"
+                    mime="application/pdf",
+                    type="primary"
                 )
+                
     except Exception as e:
         st.error(f"PDF generation failed: {e}")
         st.info("Resume content was generated, but PDF creation failed.")
@@ -443,26 +572,331 @@ st.divider()
 # -----------------------
 # Step 4: Edit & Re-make PDF
 # -----------------------
-st.header("4) Edit & Re-make PDF")
+st.header("4) Edit Resume Content")
+
 if st.session_state.generated_cv:
-    st.caption("Edit the HTML below to tweak sections. Then click Rebuild PDF.")
-    st.session_state.rendered_html = streamlit_ace.st_ace(
-        value=st.session_state.rendered_html,
-        language="html",
-        theme="chrome",
-        height=400,
-        key="html_editor"
-    )
-    if st.button("Rebuild PDF"):
-        try:
-            filename_base = f"Resume_{st.session_state.user_id}_{st.session_state.job_id}"
-            out_pdf = OUTPUT_DIR / f"{filename_base}.pdf"
-            weasyprint.HTML(string=st.session_state.rendered_html).write_pdf(str(out_pdf))
-            with open(out_pdf, "rb") as f:
-                st.download_button("Download Updated PDF", f.read(), file_name=out_pdf.name, mime="application/pdf")
-            st.success("Updated PDF generated.")
-        except Exception as e:
-            st.error(f"Rebuild failed: {e}")
+    st.caption("📝 Edit your resume content below. Changes will be applied to the final PDF.")
+    
+    # Convert structured resume to dict if needed
+    structured_dict = st.session_state.generated_cv
+    if not isinstance(structured_dict, dict):
+        structured_dict = structured_dict.dict()
+    
+    # Create an editable copy
+    if 'edited_resume' not in st.session_state:
+        st.session_state.edited_resume = structured_dict.copy()
+    
+    # Create expandable sections for better organization
+    with st.expander("👤 Personal Information & Summary", expanded=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            st.session_state.edited_resume['name'] = st.text_input(
+                "Full Name", 
+                value=st.session_state.edited_resume.get('name', ''),
+                help="Your name as it should appear on the resume"
+            )
+            st.session_state.edited_resume['email'] = st.text_input(
+                "Email", 
+                value=st.session_state.edited_resume.get('email', '')
+            )
+            st.session_state.edited_resume['phone'] = st.text_input(
+                "Phone", 
+                value=st.session_state.edited_resume.get('phone', '')
+            )
+        
+        with col2:
+            st.session_state.edited_resume['linkedin'] = st.text_input(
+                "LinkedIn URL", 
+                value=st.session_state.edited_resume.get('linkedin', '')
+            )
+            st.session_state.edited_resume['website'] = st.text_input(
+                "Website URL", 
+                value=st.session_state.edited_resume.get('website', '')
+            )
+            st.session_state.edited_resume['github'] = st.text_input(
+                "GitHub URL", 
+                value=st.session_state.edited_resume.get('github', '')
+            )
+        
+        st.session_state.edited_resume['summary'] = st.text_area(
+            "Professional Summary",
+            value=st.session_state.edited_resume.get('summary', ''),
+            height=100,
+            help="2-3 sentences highlighting your key qualifications for this role"
+        )
+    
+    with st.expander("💼 Professional Experience", expanded=True):
+        experiences = st.session_state.edited_resume.get('experience', [])
+        
+        # Allow adding/removing experience entries
+        col1, col2 = st.columns([3, 1])
+        with col2:
+            if st.button("➕ Add Experience"):
+                experiences.append({
+                    'role': '',
+                    'company': '',
+                    'start_date': '',
+                    'end_date': '',
+                    'location': '',
+                    'achievements': []
+                })
+        
+        # Edit each experience
+        updated_experiences = []
+        for i, exp in enumerate(experiences):
+            st.markdown(f"**Experience {i+1}**")
+            
+            # Basic info in columns
+            col1, col2, col3 = st.columns([2, 2, 1])
+            with col1:
+                role = st.text_input(f"Job Title", value=exp.get('role', ''), key=f"exp_role_{i}")
+                company = st.text_input(f"Company", value=exp.get('company', ''), key=f"exp_company_{i}")
+            
+            with col2:
+                start_date = st.text_input(f"Start Date", value=exp.get('start_date', ''), key=f"exp_start_{i}")
+                end_date = st.text_input(f"End Date", value=exp.get('end_date', ''), key=f"exp_end_{i}")
+            
+            with col3:
+                location = st.text_input(f"Location", value=exp.get('location', ''), key=f"exp_location_{i}")
+                # Remove experience button
+                if st.button(f"🗑️ Remove", key=f"remove_exp_{i}"):
+                    continue  # Skip this experience
+            
+            # Achievements editor with better UX
+            st.markdown("**Key Achievements:**")
+            achievements = exp.get('achievements', [])
+            
+            # Edit each achievement with individual text areas
+            updated_achievements = []
+            for j, achievement in enumerate(achievements):
+                col_a, col_b = st.columns([10, 1])
+                with col_a:
+                    updated_achievement = st.text_area(
+                        f"Achievement {j+1}",
+                        value=achievement,
+                        height=60,
+                        key=f"exp_achievement_{i}_{j}",
+                        help="Describe specific results and impact"
+                    )
+                    if updated_achievement.strip():
+                        updated_achievements.append(updated_achievement.strip())
+                
+                with col_b:
+                    if st.button("❌", key=f"remove_achievement_{i}_{j}", help="Remove this achievement"):
+                        pass  # Achievement will be skipped
+            
+            # Add new achievement button
+            if st.button(f"➕ Add Achievement", key=f"add_achievement_{i}"):
+                achievements.append("")
+                st.rerun()
+            
+            updated_experiences.append({
+                'role': role,
+                'company': company,
+                'start_date': start_date,
+                'end_date': end_date,
+                'location': location,
+                'achievements': updated_achievements
+            })
+            
+            st.divider()
+        
+        st.session_state.edited_resume['experience'] = updated_experiences
+    
+    with st.expander("🚀 Projects", expanded=False):
+        projects = st.session_state.edited_resume.get('projects', [])
+        
+        # Add/remove project controls
+        col1, col2 = st.columns([3, 1])
+        with col2:
+            if st.button("➕ Add Project"):
+                projects.append({
+                    'project_title': '',
+                    'role': '',
+                    'organization': '',
+                    'start_date': '',
+                    'end_date': '',
+                    'achievements': []
+                })
+        
+        updated_projects = []
+        for i, proj in enumerate(projects):
+            st.markdown(f"**Project {i+1}**")
+            
+            col1, col2, col3 = st.columns([2, 2, 1])
+            with col1:
+                project_title = st.text_input(f"Project Title", value=proj.get('project_title', ''), key=f"proj_title_{i}")
+                role = st.text_input(f"Your Role", value=proj.get('role', ''), key=f"proj_role_{i}")
+            
+            with col2:
+                organization = st.text_input(f"Organization", value=proj.get('organization', ''), key=f"proj_org_{i}")
+                start_date = st.text_input(f"Start Date", value=proj.get('start_date', ''), key=f"proj_start_{i}")
+            
+            with col3:
+                end_date = st.text_input(f"End Date", value=proj.get('end_date', ''), key=f"proj_end_{i}")
+                if st.button(f"🗑️ Remove", key=f"remove_proj_{i}"):
+                    continue
+            
+            # Project achievements
+            st.markdown("**Project Details:**")
+            achievements = proj.get('achievements', [])
+            updated_achievements = []
+            
+            for j, achievement in enumerate(achievements):
+                col_a, col_b = st.columns([10, 1])
+                with col_a:
+                    updated_achievement = st.text_area(
+                        f"Detail {j+1}",
+                        value=achievement,
+                        height=50,
+                        key=f"proj_achievement_{i}_{j}"
+                    )
+                    if updated_achievement.strip():
+                        updated_achievements.append(updated_achievement.strip())
+                
+                with col_b:
+                    if st.button("❌", key=f"remove_proj_achievement_{i}_{j}"):
+                        pass
+            
+            if st.button(f"➕ Add Detail", key=f"add_proj_achievement_{i}"):
+                achievements.append("")
+                st.rerun()
+            
+            updated_projects.append({
+                'project_title': project_title,
+                'role': role,
+                'organization': organization,
+                'start_date': start_date,
+                'end_date': end_date,
+                'achievements': updated_achievements
+            })
+            
+            st.divider()
+        
+        st.session_state.edited_resume['projects'] = updated_projects
+    
+    with st.expander("🎯 Skills", expanded=True):
+        skills = st.session_state.edited_resume.get('skills', [])
+        skills_text = ', '.join([str(s) for s in skills if s])
+        
+        st.session_state.edited_resume['skills'] = st.text_area(
+            "Technical & Professional Skills",
+            value=skills_text,
+            height=100,
+            help="List your most relevant skills for this position, separated by commas"
+        ).split(',')
+        
+        # Clean up skills list
+        st.session_state.edited_resume['skills'] = [
+            skill.strip() for skill in st.session_state.edited_resume['skills'] 
+            if skill.strip()
+        ]
+    
+    with st.expander("🎓 Education & Certifications", expanded=False):
+        # Education section
+        st.subheader("Education")
+        education = st.session_state.edited_resume.get('education', [])
+        
+        updated_education = []
+        for i, edu in enumerate(education):
+            st.markdown(f"**Education {i+1}**")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                degree = st.text_input(f"Degree", value=edu.get('degree', ''), key=f"edu_degree_{i}")
+                major = st.text_input(f"Major/Field", value=edu.get('major', ''), key=f"edu_major_{i}")
+            
+            with col2:
+                institution = st.text_input(f"Institution", value=edu.get('institution', ''), key=f"edu_inst_{i}")
+                year = st.text_input(f"Year", value=edu.get('graduation_year', ''), key=f"edu_year_{i}")
+            
+            updated_education.append({
+                'degree': degree,
+                'major': major,
+                'institution': institution,
+                'graduation_year': year,
+                'location': edu.get('location', ''),
+                'achievements': edu.get('achievements', '')
+            })
+            
+            st.divider()
+        
+        st.session_state.edited_resume['education'] = updated_education
+        
+        # Certifications section
+        st.subheader("Certifications")
+        certifications = st.session_state.edited_resume.get('certifications', [])
+        cert_texts = []
+        for cert in certifications:
+            if isinstance(cert, dict):
+                cert_texts.append(cert.get('title', ''))
+            else:
+                cert_texts.append(str(cert))
+        
+        cert_input = st.text_area(
+            "Professional Certifications",
+            value='\n'.join(cert_texts),
+            height=80,
+            help="List your certifications, one per line"
+        )
+        
+        # Convert back to list format
+        cert_list = [cert.strip() for cert in cert_input.split('\n') if cert.strip()]
+        st.session_state.edited_resume['certifications'] = cert_list
+    
+    # Save and regenerate PDF
+    st.divider()
+    
+    col1, col2, col3 = st.columns([1, 1, 1])
+    
+    with col1:
+        if st.button("💾 Save Changes", type="primary"):
+            # Update the main generated_cv with edited version
+            st.session_state.generated_cv = st.session_state.edited_resume
+            st.success("✅ Changes saved!")
+    
+    with col2:
+        if st.button("🔄 Reset to Original"):
+            st.session_state.edited_resume = structured_dict.copy()
+            st.rerun()
+    
+    with col3:
+        if st.button("📄 Generate PDF"):
+            try:
+                # Apply the same location logic
+                header_location = "Open to relocation"
+                if specified_location.strip():
+                    header_location = specified_location.strip()
+                
+                # Generate PDF with edited content
+                out_html, out_pdf = render_and_write_pdf(
+                    structured_result=st.session_state.edited_resume,
+                    header_location=header_location,
+                    out_dir=OUTPUT_DIR,
+                    filename_base=f"Resume_{st.session_state.user_id}_{st.session_state.job_id}_edited",
+                    include_projects=include_projects,
+                    include_volunteer=include_volunteer,
+                    resume_text=st.session_state.get("resume_text", ""),
+                    linkedin_text=st.session_state.get("linkedin_text", "")
+                )
+                
+                # Update session state with new HTML
+                st.session_state.rendered_html = out_html.read_text(encoding="utf-8")
+                
+                # Provide download
+                with open(out_pdf, "rb") as f:
+                    st.download_button(
+                        "⬇️ Download Edited PDF",
+                        data=f.read(),
+                        file_name=f"Resume_Edited_{st.session_state.user_id}_{st.session_state.job_id}.pdf",
+                        mime="application/pdf"
+                    )
+                
+                st.success("✅ PDF generated with your edits!")
+                
+            except Exception as e:
+                st.error(f"❌ Error generating PDF: {e}")
+
 else:
     st.info("Generate a resume first to enable editing.")
 

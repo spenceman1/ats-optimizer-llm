@@ -35,7 +35,7 @@
 </head>
 <body>
 
-    <!-- Name -->
+    <!-- Name (now includes certifications) -->
     <h1>{{ structured_result.name }}</h1>
 
     <!-- Header line -->
@@ -136,11 +136,16 @@
     </div>
     {% endif %}
 
-    <!-- Education & Certifications -->
-    {% if structured_result.education or structured_result.certifications %}
-        <h2>Education & Certifications</h2>
+    <!-- Conditional Education & Certifications Section -->
+    {% if structured_result.education or structured_result.has_certifications %}
+        {% if structured_result.has_certifications %}
+            <h2>Education & Certifications</h2>
+        {% else %}
+            <h2>Education</h2>
+        {% endif %}
     {% endif %}
 
+    <!-- Education entries -->
     {% for edu in structured_result.education %}
         <div class="education-item">
             {% if edu.degree %}<strong>{{ edu.degree }}{% if edu.major %}, {{ edu.major }}{% endif %}</strong>{% endif %}
@@ -148,18 +153,29 @@
             {% if edu.graduation_year %} ∙ {{ edu.graduation_year }}{% endif %}
             {% if edu.location %} ∙ {{ edu.location }}{% endif %}
             {% if edu.achievements %}
-                {% for achievement in edu.achievements if achievement and achievement|trim %}
-                    <p class="achievement">• {{ achievement | replace("•", "") | trim }}</p>
-                {% endfor %}
+                {% if edu.achievements is string %}
+                    <p class="achievement">• {{ edu.achievements | replace("•", "") | trim }}</p>
+                {% else %}
+                    {% for achievement in edu.achievements if achievement and achievement|trim %}
+                        <p class="achievement">• {{ achievement | replace("•", "") | trim }}</p>
+                    {% endfor %}
+                {% endif %}
             {% endif %}
         </div>
     {% endfor %}
 
-    {% if structured_result.certifications %}
+    <!-- Certifications entries (only if they exist) -->
+    {% if structured_result.has_certifications %}
         {% for cert in structured_result.certifications %}
-            <div class="certifications-item">
-                {% if cert.title %}{{ cert.title }}{% if cert.issuer %} ∙ {{ cert.issuer }}{% endif %}{% else %}{{ cert }}{% endif %}
-            </div>
+            {% if cert %}
+                <div class="certifications-item">
+                    {% if cert.title %}
+                        {{ cert.title }}{% if cert.issuer %} ∙ {{ cert.issuer }}{% endif %}
+                    {% else %}
+                        {{ cert }}
+                    {% endif %}
+                </div>
+            {% endif %}
         {% endfor %}
     {% endif %}
 
