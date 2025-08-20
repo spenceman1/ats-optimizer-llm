@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional
-
+import re
 
 class Experience(BaseModel):
     role: str
@@ -12,8 +12,9 @@ class Experience(BaseModel):
 
 
 class Project(BaseModel):
-    role: str
-    organization: str
+    project_title: Optional[str] = None  # <-- add this
+    role: Optional[str] = None
+    organization: Optional[str] = None
     start_date: Optional[str] = None
     end_date: Optional[str] = None
     location: Optional[str] = None
@@ -95,18 +96,33 @@ def map_input_to_structured_output(parsed_data: dict) -> StructuredOutput:
     ]
 
     # Map projects
-    projects = [
-        Project(
-            role=proj.get("role",""),
-            organization=proj.get("organization",""),
-            start_date=proj.get("start_date"),
-            end_date=proj.get("end_date"),
-            location=proj.get("location"),
-            achievements=safe_list(proj.get("achievements"))
+    projects = []
+    for proj in safe_list(parsed_data.get("projects")):
+        if not isinstance(proj, dict):
+            continue
+
+        # 1) Clean internal spaces
+        import re
+        project_title = re.sub(r'\s+', ' ', (proj.get("project_title") or proj.get("title") or proj.get("name") or "")).strip()
+        role = re.sub(r'\s+', ' ', (proj.get("role") or "")).strip()
+        organization = re.sub(r'\s+', ' ', (proj.get("organization") or "Independent Project")).strip()
+        start_date = proj.get("start_date")
+        end_date = proj.get("end_date")
+        location = proj.get("location")
+        achievements = safe_list(proj.get("achievements"))
+
+        # 2) Create Project object
+        projects.append(
+            Project(
+                project_title=project_title,
+                role=role,
+                organization=organization,
+                start_date=start_date,
+                end_date=end_date,
+                location=location,
+                achievements=achievements
+            )
         )
-        for proj in safe_list(parsed_data.get("projects"))
-        if isinstance(proj, dict)
-    ]
 
     # Map education
     education = [

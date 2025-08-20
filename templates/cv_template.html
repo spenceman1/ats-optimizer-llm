@@ -20,8 +20,7 @@
         .experience-item, .projects-item, .volunteering-item { margin-bottom: 10px; page-break-inside: avoid; }
         .role-line { font-weight: 700; font-size: 12pt; margin: 0; }
         .role-meta { font-size: 11pt; color: #333; margin: 2px 0 4px 0; }
-        ul { margin: 4px 0 8px 18px; padding: 0; font-size: 11.5pt; }
-        li { margin-bottom: 4px; }
+        .achievement { margin: 0 0 4px 0; font-size: 11.5pt; }
 
         /* Education & certs */
         .education-item { margin-bottom: 6px; font-size: 11.5pt; }
@@ -61,13 +60,15 @@
     {% for exp in structured_result.experience %}
     <div class="experience-item">
         <p class="role-line">{{ exp.role or "" }}</p>
-        <p class="role-meta">{{ exp.company or "" }}{% if exp.start_date or exp.end_date %} ∙ {{ exp.start_date or "" }} - {{ exp.end_date or "" }}{% endif %}{% if exp.location %} ∙ {{ exp.location }}{% endif %}</p>
+        <p class="role-meta">
+            {{ exp.company or "" }}
+            {% if exp.start_date or exp.end_date %} ∙ {{ exp.start_date or "" }} - {{ exp.end_date or "" }}{% endif %}
+            {% if exp.location %} ∙ {{ exp.location }}{% endif %}
+        </p>
         {% if exp.achievements %}
-        <ul>
-            {% for achievement in exp.achievements %}
-                <li>{{ achievement }}</li>
+            {% for achievement in exp.achievements if achievement and achievement|trim %}
+                <p class="achievement">• {{ achievement | replace("•", "") | trim }}</p>
             {% endfor %}
-        </ul>
         {% endif %}
     </div>
     {% endfor %}
@@ -78,14 +79,22 @@
     <h2>Project Experience</h2>
     {% for proj in structured_result.projects %}
     <div class="projects-item">
-        <p class="role-line">{{ proj.role or "" }}</p>
-        <p class="role-meta">{{ proj.organization or "" }}{% if proj.start_date or proj.end_date %} ∙ {{ proj.start_date or "" }} - {{ proj.end_date or "" }}{% endif %}{% if proj.location %} ∙ {{ proj.location }}{% endif %}</p>
+        <p class="role-line">{{ (proj.project_title or proj.title or "") | trim }}</p>
+        <p class="role-meta">
+            {% set parts = [] %}
+            {% if proj.role %}{% do parts.append(proj.role) %}{% endif %}
+            {% if proj.organization and proj.organization not in parts %}{% do parts.append(proj.organization) %}{% endif %}
+            {% if proj.start_date or proj.end_date %}
+                {% set dates = (proj.start_date or "") ~ (" - " if proj.start_date and proj.end_date else "") ~ (proj.end_date or "") %}
+                {% if dates.strip() != "-" %}{% do parts.append(dates) %}{% endif %}
+            {% endif %}
+            {% if proj.location %}{% do parts.append(proj.location) %}{% endif %}
+            {{ parts | join(" ∙ ") }}
+        </p>
         {% if proj.achievements %}
-        <ul>
-            {% for achievement in proj.achievements %}
-                <li>{{ achievement }}</li>
+            {% for achievement in proj.achievements if achievement and achievement|trim %}
+                <p class="achievement">• {{ achievement | replace("•", "") | trim }}</p>
             {% endfor %}
-        </ul>
         {% endif %}
     </div>
     {% endfor %}
@@ -96,14 +105,22 @@
     <h2>Volunteering Experience</h2>
     {% for vol in structured_result.volunteering %}
     <div class="volunteering-item">
-        <p class="role-line">{{ vol.role or "" }}</p>
-        <p class="role-meta">{{ vol.organization or "" }}{% if vol.start_date or vol.end_date %} ∙ {{ vol.start_date or "" }} - {{ vol.end_date or "" }}{% endif %}{% if vol.location %} ∙ {{ vol.location }}{% endif %}</p>
+        <p class="role-line">{{ vol.role | trim }}</p>
+        <p class="role-meta">
+            {% set parts = [] %}
+            {% if vol.role and vol.role != "Independent Project" %}{{ parts.append(vol.role) }}{% endif %}
+            {% if vol.organization and vol.organization not in parts %}{{ parts.append(vol.organization) }}{% endif %}
+            {% if vol.start_date or vol.end_date %}
+                {% set dates = (vol.start_date or "") ~ (" – " if vol.start_date and vol.end_date else "") ~ (vol.end_date or "") %}
+                {{ parts.append(dates) if dates.strip() != " – " else "" }}
+            {% endif %}
+            {% if vol.location %}{{ parts.append(vol.location) }}{% endif %}
+            {{ parts | join(" ∙ ") }}
+        </p>
         {% if vol.achievements %}
-        <ul>
-            {% for achievement in vol.achievements %}
-                <li>{{ achievement }}</li>
+            {% for achievement in vol.achievements if achievement and achievement|trim %}
+                <p class="achievement">• {{ achievement | replace("•", "") | trim }}</p>
             {% endfor %}
-        </ul>
         {% endif %}
     </div>
     {% endfor %}
@@ -113,7 +130,7 @@
     {% if structured_result.skills %}
     <h2>Skills</h2>
     <div class="skills">
-        {% for skill in structured_result.skills %}
+        {% for skill in structured_result.skills if skill and (skill.skill or skill)|trim %}
             {% if skill.skill %}{{ skill.skill }}{% else %}{{ skill }}{% endif %}{% if not loop.last %}, {% endif %}
         {% endfor %}
     </div>
@@ -131,9 +148,9 @@
             {% if edu.graduation_year %} ∙ {{ edu.graduation_year }}{% endif %}
             {% if edu.location %} ∙ {{ edu.location }}{% endif %}
             {% if edu.achievements %}
-            <ul>
-                <li>{{ edu.achievements }}</li>
-            </ul>
+                {% for achievement in edu.achievements if achievement and achievement|trim %}
+                    <p class="achievement">• {{ achievement | replace("•", "") | trim }}</p>
+                {% endfor %}
             {% endif %}
         </div>
     {% endfor %}
