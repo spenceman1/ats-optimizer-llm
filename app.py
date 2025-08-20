@@ -7,6 +7,8 @@ import pandas as pd
 from jinja2 import Environment, FileSystemLoader
 import weasyprint
 import streamlit_ace
+import importlib
+import sys
 
 # Internal libraries
 from file_management import (
@@ -25,6 +27,9 @@ from file_management import (
 from llm_agent import LLMAgent  # LLM wrapper
 from llm_agent import LLM_Chat  # Optional chat wrapper
 
+# Force reload of resume_optimizer to pick up changes
+if 'resume_optimizer' in sys.modules:
+    importlib.reload(sys.modules['resume_optimizer'])
 from resume_optimizer import ResumeOptimizer
 
 # -----------------------
@@ -59,8 +64,24 @@ def pick_profile_links(resume_text: str, linkedin_text: str):
     urls = find_links(all_text)
     linkedin_url = next((u for u in urls if "linkedin.com" in u.lower()), None)
     github_url = next((u for u in urls if "github.com" in u.lower()), None)
+    
+    # Look for website URLs - prioritize personal domains
+    website_url = None
     candidates = [u for u in urls if u not in [linkedin_url, github_url]]
-    website_url = candidates[0] if candidates else None
+    
+    # Check for common personal website patterns
+    for url in candidates:
+        lower_url = url.lower()
+        if any(domain in lower_url for domain in ['.page', '.dev', '.io', '.com', '.net', '.org']):
+            # Skip common platforms that aren't personal websites
+            if not any(platform in lower_url for platform in ['facebook', 'twitter', 'instagram', 'youtube']):
+                website_url = url
+                break
+    
+    # If no good candidate found, use first non-social URL
+    if not website_url and candidates:
+        website_url = candidates[0]
+    
     return {"linkedin": linkedin_url, "github": github_url, "website": website_url}
 
 def slim_skills(structured_result):
@@ -191,14 +212,24 @@ def has_relevant_certifications(structured_dict):
     if not certifications:
         return False
     
-    # Filter out empty certifications
+    # Filter out empty certifications and avoid duplicates
     valid_certs = []
+    seen_titles = set()
+    
     for cert in certifications:
+        title = ""
         if isinstance(cert, dict):
-            if cert.get("title") and cert.get("title").strip():
+            title = cert.get("title", "").strip()
+        elif isinstance(cert, str):
+            title = cert.strip()
+        
+        # Skip empty, summary text, or already seen certifications
+        if title and len(title) > 3 and title not in seen_titles:
+            # Skip if it looks like summary text (contains common summary words)
+            summary_indicators = ['with experience', 'certified project management professional with', 'experienced in']
+            if not any(indicator in title.lower() for indicator in summary_indicators):
                 valid_certs.append(cert)
-        elif isinstance(cert, str) and cert.strip():
-            valid_certs.append(cert)
+                seen_titles.add(title)
     
     return len(valid_certs) > 0
 
@@ -231,6 +262,19 @@ def render_and_write_pdf(
     data["website"] = data.get("website") or None
     data["location"] = header_location or data.get("location")
     
+    # Extract profile links from resume and linkedin text
+    profile_links = pick_profile_links(resume_text, linkedin_text)
+    if not data["linkedin"] and profile_links["linkedin"]:
+        data["linkedin"] = profile_links["linkedin"]
+    if not data["github"] and profile_links["github"]:
+        data["github"] = profile_links["github"]
+    if not data["website"] and profile_links["website"]:
+        data["website"] = profile_links["website"]
+    
+    # Ensure website has proper protocol for hyperlinks
+    if data.get("website") and not data["website"].startswith(("http://", "https://")):
+        data["website"] = f"https://{data['website']}"
+    
     if "certifications" not in data or data["certifications"] is None:
         data["certifications"] = []
 
@@ -241,18 +285,18 @@ def render_and_write_pdf(
             return found
         txt = text.lower()
         known = [
-            ("Project Management Professional (PMP)", ["pmp", "project management professional"]),
-            ("Export Compliance Certification", ["export compliance", "citi program", "citi"]),
-            ("Certified Scrum Master (CSM)", ["scrum master", "csm"]),
-            ("Lean Six Sigma", ["six sigma", "lean six sigma"]),
-            ("Certified Information Systems Security Professional (CISSP)", ["cissp"]),
-            ("Professional in Human Resources (PHR)", ["phr"]),
-            ("Chartered Financial Analyst (CFA)", ["cfa"])
+            ("Project Management Professional (PMP)", "Project Management Institute", ["pmp", "project management professional"]),
+            ("Export Compliance Certification", "CITI Program", ["export compliance", "citi program", "citi"]),
+            ("Certified Scrum Master (CSM)", "Scrum Alliance", ["scrum master", "csm"]),
+            ("Lean Six Sigma", "Various", ["six sigma", "lean six sigma"]),
+            ("Certified Information Systems Security Professional (CISSP)", "(ISC)²", ["cissp"]),
+            ("Professional in Human Resources (PHR)", "HR Certification Institute", ["phr"]),
+            ("Chartered Financial Analyst (CFA)", "CFA Institute", ["cfa"])
         ]
-        for title, keys in known:
+        for title, issuer, keys in known:
             for k in keys:
-                if k in txt and title not in [c if isinstance(c,str) else c.get("title") for c in found]:
-                    found.append({"title": title, "issuer": ""})
+                if k in txt and title not in [c.get("title") if isinstance(c,dict) else str(c) for c in found]:
+                    found.append({"title": title, "issuer": issuer})
                     break
         
         # Look for certification patterns in text
@@ -268,17 +312,40 @@ def render_and_write_pdf(
     existing_titles = set()
     cleaned = []
     
-    for c in data.get("certifications", []) or []:
-        t = c.get("title") if isinstance(c, dict) else str(c)
-        if t and t.strip() and t not in existing_titles:
-            existing_titles.add(t)
-            cleaned.append(c)
+    # Process ALL certifications - both existing and auto-detected
+    all_certs = list(data.get("certifications", []) or []) + auto
     
-    for ac in auto:
-        title = ac.get("title") if isinstance(ac, dict) else ac
-        if title and title.strip() and title not in existing_titles:
-            cleaned.append(ac)
-            existing_titles.add(title)
+    for cert in all_certs:
+        title = ""
+        issuer = ""
+        
+        if isinstance(cert, dict):
+            title = cert.get("title", "").strip()
+            issuer = cert.get("issuer", "").strip()
+        elif isinstance(cert, str):
+            title = cert.strip()
+            issuer = ""
+        
+        # Skip empty, very short, or problematic entries
+        if not title or len(title) < 4:
+            continue
+            
+        # Skip entries that look like summary text
+        skip_phrases = [
+            'with experience', 'certified project management professional with', 
+            'experienced in', 'certifications', 'summary', 'professional with'
+        ]
+        
+        if any(phrase in title.lower() for phrase in skip_phrases):
+            continue
+            
+        # Skip duplicates
+        if title in existing_titles:
+            continue
+            
+        # Add valid certification
+        existing_titles.add(title)
+        cleaned.append({"title": title, "issuer": issuer})
     
     data["certifications"] = cleaned
     
@@ -314,9 +381,14 @@ if location_mode == "Specific location":
 api_key_path_input = st.sidebar.text_input("Path to API key file", value=str(API_KEY_FILE))
 
 # Session state initialization
-for key in ["user_id","user_name","resume_text","linkedin_text","job_id","selected_job_text","generated_cv","rendered_html","chat_history","website","github"]:
+for key in ["user_id","user_name","resume_text","linkedin_text","job_id","selected_job_text","generated_cv","rendered_html","chat_history","website","github","optimize_resume"]:
     if key not in st.session_state:
-        st.session_state[key] = None if key in ["user_id","job_id","generated_cv","chat_history"] else ""
+        if key == "optimize_resume":
+            st.session_state[key] = True  # Default to True
+        elif key in ["user_id","job_id","generated_cv","chat_history"]:
+            st.session_state[key] = None
+        else:
+            st.session_state[key] = ""
 
 # -----------------------
 # Step 1: User selection/creation
@@ -423,6 +495,14 @@ st.divider()
 # -----------------------
 # Step 3: Generate Tailored Resume
 # -----------------------
+
+# Add the optimization checkbox before the generate button
+st.session_state.optimize_resume = st.checkbox(
+    "🎯 Optimize for Job Relevance & Length", 
+    value=st.session_state.get("optimize_resume", True),
+    help="Automatically optimize resume for the job description and one-page format"
+)
+
 if st.button("Generate with AI"):
     if not st.session_state.selected_job_text.strip():
         st.warning("Select or create a job first.")
@@ -483,31 +563,59 @@ if st.button("Generate with AI"):
             else:
                 structured_dict = structured
 
+            # Debug: Show LLM-generated data structure
+            st.write("**Debug - LLM Generated Experience Structure:**")
+            for i, exp in enumerate(structured_dict.get('experience', [])):
+                st.write(f"Role {i+1}: {len(exp.get('achievements', []))} bullets")
+
             # Clean text fields
             structured_dict = clean_text_fields(structured_dict)
             
             # Apply resume optimization
-            if st.checkbox("🎯 Optimize for Job Relevance & Length", value=True, 
-                          help="Automatically optimize resume for the job description and one-page format"):
+            if st.session_state.optimize_resume:
                 optimizer = ResumeOptimizer()
                 
                 original_skills_count = len(structured_dict.get('skills', []))
                 original_projects_count = len(structured_dict.get('projects', []))
                 
-                # Apply optimization
+                # Debug: Show original experience bullets
+                original_bullets = []
+                for exp in structured_dict.get('experience', []):
+                    original_bullets.append(len(exp.get('achievements', [])))
+                
+                # Debug: Show extracted keywords
+                keywords = optimizer.extract_job_keywords(st.session_state.selected_job_text)
+                st.write(f"**Debug - Extracted Keywords:** {keywords[:10]}")  # Show first 10
+                
+                # Apply optimization with debugging
+                st.write("**Debug - Applying optimization...**")
+                structured_dict_before = structured_dict.copy()
                 structured_dict = optimizer.optimize_resume(
                     structured_dict, 
-                    st.session_state.selected_job_text
+                    st.session_state.selected_job_text,
+                    st.session_state.resume_text,
+                    st.session_state.linkedin_text
                 )
+                
+                # Debug: Verify optimization was applied
+                st.write("**Debug - Post-Optimization Check:**")
+                st.write(f"Skills before: {[s for s in structured_dict_before.get('skills', [])]}")
+                st.write(f"Skills after: {[s for s in structured_dict.get('skills', [])]}")
                 
                 optimized_skills_count = len(structured_dict.get('skills', []))
                 optimized_projects_count = len(structured_dict.get('projects', []))
+                
+                # Debug: Show optimized experience bullets
+                optimized_bullets = []
+                for exp in structured_dict.get('experience', []):
+                    optimized_bullets.append(len(exp.get('achievements', [])))
                 
                 # Show optimization summary
                 st.info(f"""
                 ✅ **Optimization Applied:**
                 - Skills: Focused on {optimized_skills_count} most relevant (from {original_skills_count})
                 - Projects: Showing {optimized_projects_count} most relevant (from {original_projects_count})
+                - Experience bullets: {original_bullets} → {optimized_bullets}
                 - Achievements: Prioritized based on job requirements
                 - Format: Optimized for one-page length
                 """)
@@ -522,6 +630,16 @@ if st.button("Generate with AI"):
     # Ensure projects and volunteering keys exist
     structured_dict.setdefault("projects", [])
     structured_dict.setdefault("volunteering", [])
+    
+    # Add website and github from session state if not already present
+    if not structured_dict.get("website") and st.session_state.get("website"):
+        website_url = st.session_state.website
+        # Ensure proper protocol
+        if not website_url.startswith(("http://", "https://")):
+            website_url = f"https://{website_url}"
+        structured_dict["website"] = website_url
+    if not structured_dict.get("github") and st.session_state.get("github"):
+        structured_dict["github"] = st.session_state.github
 
     # PDF generation with improved certification handling
     try:
@@ -587,7 +705,7 @@ if st.session_state.generated_cv:
         st.session_state.edited_resume = structured_dict.copy()
     
     # Create expandable sections for better organization
-    with st.expander("👤 Personal Information & Summary", expanded=True):
+    with st.expander("👤 Personal Information & Summary", expanded=False):
         col1, col2 = st.columns(2)
         with col1:
             st.session_state.edited_resume['name'] = st.text_input(
@@ -625,7 +743,7 @@ if st.session_state.generated_cv:
             help="2-3 sentences highlighting your key qualifications for this role"
         )
     
-    with st.expander("💼 Professional Experience", expanded=True):
+    with st.expander("💼 Professional Experience", expanded=False):
         experiences = st.session_state.edited_resume.get('experience', [])
         
         # Allow adding/removing experience entries
@@ -674,7 +792,7 @@ if st.session_state.generated_cv:
                     updated_achievement = st.text_area(
                         f"Achievement {j+1}",
                         value=achievement,
-                        height=60,
+                        height=68,  # Changed from 60 to 68
                         key=f"exp_achievement_{i}_{j}",
                         help="Describe specific results and impact"
                     )
@@ -748,7 +866,7 @@ if st.session_state.generated_cv:
                     updated_achievement = st.text_area(
                         f"Detail {j+1}",
                         value=achievement,
-                        height=50,
+                        height=68,  # Changed from 50 to 68
                         key=f"proj_achievement_{i}_{j}"
                     )
                     if updated_achievement.strip():
@@ -775,7 +893,7 @@ if st.session_state.generated_cv:
         
         st.session_state.edited_resume['projects'] = updated_projects
     
-    with st.expander("🎯 Skills", expanded=True):
+    with st.expander("🎯 Skills", expanded=False):
         skills = st.session_state.edited_resume.get('skills', [])
         skills_text = ', '.join([str(s) for s in skills if s])
         
@@ -829,7 +947,12 @@ if st.session_state.generated_cv:
         cert_texts = []
         for cert in certifications:
             if isinstance(cert, dict):
-                cert_texts.append(cert.get('title', ''))
+                title = cert.get('title', '')
+                issuer = cert.get('issuer', '')
+                if issuer:
+                    cert_texts.append(f"{title} | {issuer}")
+                else:
+                    cert_texts.append(title)
             else:
                 cert_texts.append(str(cert))
         
@@ -837,11 +960,23 @@ if st.session_state.generated_cv:
             "Professional Certifications",
             value='\n'.join(cert_texts),
             height=80,
-            help="List your certifications, one per line"
+            help="List your certifications, one per line. Format: 'Certification Name | Issuing Organization'"
         )
         
-        # Convert back to list format
-        cert_list = [cert.strip() for cert in cert_input.split('\n') if cert.strip()]
+        # Convert back to list format with title and issuer
+        cert_list = []
+        for cert_line in cert_input.split('\n'):
+            cert_line = cert_line.strip()
+            if cert_line:
+                if '|' in cert_line:
+                    parts = cert_line.split('|', 1)
+                    cert_list.append({
+                        'title': parts[0].strip(),
+                        'issuer': parts[1].strip() if len(parts) > 1 else ''
+                    })
+                else:
+                    cert_list.append({'title': cert_line, 'issuer': ''})
+        
         st.session_state.edited_resume['certifications'] = cert_list
     
     # Save and regenerate PDF

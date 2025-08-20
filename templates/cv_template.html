@@ -14,7 +14,7 @@
         .contact-line a { text-decoration: underline; color: #0066cc; }
 
         /* Section headings */
-        h2 { font-size: 12pt; margin: 14px 0 6px 0; padding-bottom: 2px; border-bottom: 1px solid #ddd; }
+        h2 { font-size: 12pt; margin: 14px 0 6px 0; padding-bottom: 2px; border-bottom: 1px solid #ddd; font-weight: bold; }
 
         /* Experience, projects, volunteering */
         .experience-item, .projects-item, .volunteering-item { margin-bottom: 10px; page-break-inside: avoid; }
@@ -22,9 +22,9 @@
         .role-meta { font-size: 11pt; color: #333; margin: 2px 0 4px 0; }
         .achievement { margin: 0 0 4px 0; font-size: 11.5pt; }
 
-        /* Education & certs */
-        .education-item { margin-bottom: 6px; font-size: 11.5pt; }
-        .certifications-item { margin-bottom: 4px; font-size: 11.5pt; }
+        /* Education & certifications combined */
+        .edu-cert-item { margin-bottom: 6px; font-size: 11.5pt; }
+        .edu-cert-title { font-weight: bold; display: inline; }
 
         /* Skills */
         .skills { margin-top: 6px; font-size: 11.5pt; }
@@ -43,7 +43,7 @@
         {{ structured_result.email or "" }}
         {% if structured_result.phone %} ∙ {{ structured_result.phone }}{% endif %}
         {% if structured_result.linkedin %} ∙ <a href="{{ structured_result.linkedin }}">LinkedIn</a>{% endif %}
-        {% if structured_result.website %} ∙ <a href="{{ structured_result.website }}">Website</a>{% endif %}
+        {% if structured_result.website %} ∙ <a href="{{ structured_result.website }}">{{ structured_result.website.replace('https://', '').replace('http://', '').replace('www.', '') }}</a>{% endif %}
         {% if structured_result.github %} ∙ <a href="{{ structured_result.github }}">GitHub</a>{% endif %}
         {% if structured_result.location %} ∙ {{ structured_result.location }}{% endif %}
     </div>
@@ -136,47 +136,31 @@
     </div>
     {% endif %}
 
-    <!-- Conditional Education & Certifications Section -->
+    <!-- Combined Education & Certifications Section -->
     {% if structured_result.education or structured_result.has_certifications %}
-        {% if structured_result.has_certifications %}
-            <h2>Education & Certifications</h2>
-        {% else %}
-            <h2>Education</h2>
-        {% endif %}
-    {% endif %}
-
+    <h2>Education & Certifications</h2>
+    
     <!-- Education entries -->
     {% for edu in structured_result.education %}
-        <div class="education-item">
-            {% if edu.degree %}<strong>{{ edu.degree }}{% if edu.major %}, {{ edu.major }}{% endif %}</strong>{% endif %}
-            {% if edu.institution %} ∙ {{ edu.institution }}{% endif %}
-            {% if edu.graduation_year %} ∙ {{ edu.graduation_year }}{% endif %}
-            {% if edu.location %} ∙ {{ edu.location }}{% endif %}
-            {% if edu.achievements %}
-                {% if edu.achievements is string %}
-                    <p class="achievement">• {{ edu.achievements | replace("•", "") | trim }}</p>
-                {% else %}
-                    {% for achievement in edu.achievements if achievement and achievement|trim %}
-                        <p class="achievement">• {{ achievement | replace("•", "") | trim }}</p>
-                    {% endfor %}
-                {% endif %}
-            {% endif %}
+        <div class="edu-cert-item">
+            <span class="edu-cert-title">
+                {% if edu.degree %}{{ edu.degree }}{% if edu.major %}, {{ edu.major }}{% endif %}{% endif %}
+            </span>
+            {% if edu.institution %} | {{ edu.institution }}{% endif %}
         </div>
     {% endfor %}
 
     <!-- Certifications entries (only if they exist) -->
     {% if structured_result.has_certifications %}
         {% for cert in structured_result.certifications %}
-            {% if cert %}
-                <div class="certifications-item">
-                    {% if cert.title %}
-                        {{ cert.title }}{% if cert.issuer %} ∙ {{ cert.issuer }}{% endif %}
-                    {% else %}
-                        {{ cert }}
-                    {% endif %}
+            {% if cert and (cert.title or cert) and cert.title %}
+                <div class="edu-cert-item">
+                    <span class="edu-cert-title">{{ cert.title }}</span>
+                    {% if cert.issuer and cert.issuer.strip() %} | {{ cert.issuer }}{% endif %}
                 </div>
             {% endif %}
         {% endfor %}
+    {% endif %}
     {% endif %}
 
 </body>
